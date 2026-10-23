@@ -10,6 +10,7 @@ Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-
 - [x] An I²C logger runs on the real VSC via `LD_PRELOAD`, with a hidden live debug page.
 - [x] Status payload decoded: temperatures, RH, fan speed, fault bits, boost acknowledgement.
 - [x] Settings frame decoded: setpoints, airflow % and mode flags.
+- [x] Bus cable wiring measured: red +10 V, blue 0 V, green RS485 A, yellow RS485 B (see [docs/protocol.md](docs/protocol.md#wiring-vsc-to-mrxbox-4-core-bus-cable)).
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
 - [ ] ESP acting as the controller (replacing the VSC).
@@ -37,7 +38,8 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 
 | Path | What |
 |---|---|
-| `docs/protocol.md` | I²C framing, RX status bytes, TX settings frame, menus and ranges |
+| `docs/protocol.md` | I²C framing, RX status bytes, TX settings frame, menus and ranges, bus wiring, RS485 cross-reference |
+| `docs/images/` | Annotated VSC board photos and the wall box colour label |
 | `logger/i2clog.c` | `LD_PRELOAD` library: logs every I²C exchange to `/i2clog.txt` and adds the debug pages |
 | `logger/build.sh` | Builds `i2clog.so` with `zig cc` (ARM926EJ-S, freestanding) |
 | `tools/mkimg.py` | Builds a logger SD image from a **copy** of a stock card dump |

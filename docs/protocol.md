@@ -122,6 +122,66 @@ A touchscreen test: touch the four corners (keys 0x31–0x34) and the centre box
 ## CO2 sensor support (library only)
 `msp430lib_get_co2` uses a separate I²C handle (CO2lib_init). It writes `22 00 08 2a` (a Senseair K30-style "read RAM 0x08" command), waits 20 ms, reads 4 bytes, and returns CO2 ppm = b1·256 + b2. No screen in this firmware shows it.
 
+## Wiring: VSC to MRXBOX (4-core bus cable)
+
+The wall box has a colour label red / yellow / green / blue next to the cable entry. Measured on my unit with the VSC powered and connected, meter black probe on blue:
+
+| Wire | Signal | Measured |
+|---|---|---|
+| Red | Supply + | +10 V, steady |
+| Blue | 0 V / GND | reference |
+| Green | RS485 A (D+) | 1–2 V, jumping with traffic |
+| Yellow | RS485 B (D−) | 1–2 V, jumping with traffic |
+
+- Red probe on yellow, black on green reads slightly negative (under 0.5 V), so green idles higher and is A. The difference is small and the meter averages over traffic, and some vendors label A/B the other way round. If a tap decodes garbage or inverted bytes, swap green and yellow; it does no harm.
+- Blue → C71 "−" leg (board ground) should read ~0 Ω with power off. Not yet checked.
+- Listen-only tap (e.g. MAX3485 at 3.3 V): A ← green, B ← yellow, GND ← blue, RO → ESP RX, DE and /RE tied to GND. **Red (supply) must never connect to the ESP.**
+
+![Wall box colour label](images/wallbox_wire_label.jpg)
+
+### VSC board (Rev C, 650931)
+
+![VSC board front, annotated](images/pcb_front_annotated.jpg)
+
+![VSC board back, annotated](images/pcb_back_annotated.jpg)
+
+- **Grey 4-pin connector** (front, bottom left) is the bus cable. On the back its pads are P1–P4, with D1 (SMA diode, likely supply-input protection) next to one end pad.
+- **R109/R110 "BIAS"** and **"T"** (termination) on the back sit on the RS485 pair; the traces run to the two middle pads, so data is in the middle and power on the outer pins.
+- **IC12** "5430" is a TPS5430 buck regulator (with L3/L4/L5 15 µH, D2/D5/D6). C71 (220 µF / 10 V) is a handy ground point at its "−" leg.
+- **D7 "LINK"** LED blinks with bus traffic.
+- **20-pin TSSOP** next to J3 is most likely the bus micro (the firmware calls it msp430). **J3** is labelled 0V / MCLR / CLK / DAT, a PIC-style ICSP header, so the part number still needs reading off the chip.
+- **Linux serial console** RX / TX / 0V header is next to the SD card.
+- The RS485 transceiver chip has not been identified from the photos yet.
+
+Close-ups: [bus connector, front](images/bus_connector_front.jpg), [bus pads, back](images/bus_pads_back.jpg).
+
+## RS485 cross-reference (prior art)
+
+@jamesgrogantech posted an RS485 capture of the same bus on the [HA forum thread](https://community.home-assistant.io/t/nuaire-mrxbox-interface-for-home-assistant/573933): 1200 baud 8N1, bytes sent MSB-first (a normal UART sees them bit-reversed), a burst of 9 messages repeating about every 0.7 s:
+
+```
+21 AA F4 D4
+11 F6 4C
+51 FE FE FE 04
+31 FE FE 9A
+33 FE FE 98
+85 2E FE 30 FE FE CE
+A3 FE … 08
+75 FE … DE
+3B C2 54 06
+```
+
+How that lines up with the I²C fields above:
+
+| RS485 | I²C | Note |
+|---|---|---|
+| `21` byte 1 = `AA` | p8 = `aa` | Fault flags A ("Flt: Htr") |
+| `21` byte 2 bit 0x02 (F4 boost / F6 normal) | p7 f6 → d6 on boost | Boost state; exact bit mapping still to confirm |
+| `3B` byte 1 (C2 → 67 % reversed) | p18 | RH, same bit-reversed active-low encoding |
+| `3B` byte 2 = `54` | p19 = `54` | Same value; meaning still open |
+
+His capture has no temperatures in the broadcast, the checksum is unknown, and replaying a boost message did not work. Lining up a simultaneous RS485 + I²C capture is the next step.
+
 ## Still open
 - p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far. Run 3: pressing speed 3 (boost) on Home sent req 0c and then 0d, which stayed for about 26 minutes (from 158 s to the end), with p11 at e8 throughout; p15 follows as the checksum (ab → 8b → 8d → 9d). p9 stayed f6 (the speed-1 pattern) the whole time, so the p9 speed bits don't reflect boost; the v5 debug page also shows "Spd 1" during boost. Use p7 bit 0x20 / p11 to detect boost.
 - Reply header bytes: zero in runs 1–2, but an echo of TX d1..d8 from run 3 on, identical for every req (see above).
