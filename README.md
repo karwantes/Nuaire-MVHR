@@ -2,6 +2,12 @@
 
 Reverse-engineering the Nuaire MRXBOX **VSC / MRX Control** touchscreen, with the aim of replacing it with an ESP32 (ESPHome) and controlling the unit from Home Assistant.
 
+<p align="center">
+  <a href="https://buymeacoffee.com/karwantes"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="60"></a>
+  <br>
+  <b>If this project saved you time or a new controller, a coffee keeps it going. Thank you!</b>
+</p>
+
 Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-assistant.io/t/nuaire-mrxbox-interface-for-home-assistant/573933) (HA community).
 
 ## Status
