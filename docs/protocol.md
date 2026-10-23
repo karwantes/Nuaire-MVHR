@@ -74,10 +74,10 @@ Starting a timed mode sets bits 4–7 and then clears its own bit, so only one m
 | p15 | Checksum `~(p7^…^p14)` | – |
 | p16 | Outside temp: p16>>1, signed 7-bit, °C; −63 = fault | 0x708c8 |
 | p17 | ~p16 (check byte); mismatch prints "Outside temp checksum error" | – |
-| p18 | **Humidity %**: v = p18>>1, active low and bit-reversed (bit 6 clear = +1 … bit 0 clear = +64). 0 or 127 = sensor fault (Diagnostics "Humidity Sensor" row). Live: 4a → 45 %, 8a → 46 % | 0x708cb |
+| p18 | **Humidity %**: v = p18>>1, active low and bit-reversed (bit 6 clear = +1 … bit 0 clear = +64). 0 or 127 = sensor fault (Diagnostics "Humidity Sensor" row). Live: 2a → 43 %, ca → 44 %, 4a → 45 %, 8a → 46 %, 0a → 47 %, f2 → 48 % | 0x708cb |
 | p19 | Same encoding as p18; no reader found. Live: 0x54 → 85 | 0x708cc |
 
-The 8 header bytes of every reply (before p0) were 00 in all captured frames.
+The 8 header bytes of every reply (before p0) were 00 in runs 1 and 2. In run 3 (logger v5) they were `60 84 00 e5 c8 c8 24 40` in every reply, which is d1..d8 of the settings frame sent just before. es-lcd ignores them, so whether the MSP430 echoes its receive buffer or something else causes this is still open.
 
 p8 = p9 = 0xff means "No communications" (every Diagnostics row shows "?" and the comms row a cross). A change in p1, p5, p8, p9 or p16 triggers a redraw.
 
@@ -122,6 +122,7 @@ A touchscreen test: touch the four corners (keys 0x31–0x34) and the centre box
 `msp430lib_get_co2` uses a separate I²C handle (CO2lib_init). It writes `22 00 08 2a` (a Senseair K30-style "read RAM 0x08" command), waits 20 ms, reads 4 bytes, and returns CO2 ppm = b1·256 + b2. No screen in this firmware shows it.
 
 ## Still open
-- p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far.
+- p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far. Run 3: pressing speed 3 (boost) on Home sent req 0c and then 0d, which stayed for about 26 minutes (from 158 s to the end), with p11 at e8 throughout; p15 follows as the checksum (ab → 8b → 8d → 9d). p9 stayed f6 (the speed-1 pattern) the whole time, so the p9 speed bits don't reflect boost.
+- Reply header bytes: zero in runs 1–2, but an echo of TX d1..d8 in run 3 (see above).
 - p19 meaning (no reader in es-lcd). The RS485 bus capture posted on the HA forum shows a `3B C2 54 06` message whose byte 2 is also 0x54, so p19 likely mirrors that field.
 - p8 = 0xaa has bit 0x40 clear ("Heater fail"): check what the Settings status line shows on the real unit (possibly no heater fitted).
