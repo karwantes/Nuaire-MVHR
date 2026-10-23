@@ -42,6 +42,7 @@ When the bypass override starts, it clears d0 bit 7 (override on) and bit 0, and
 - **Write (TX):** `cmd, data[0..n-1], chk` where `chk = ~(data[0] ^ … ^ data[n-1])`. The settings frame is `cmd 0x20`, n = 11. A 100 µs pause follows.
 - **Read (RX):** write 3 bytes `00, req, ~req`, wait 100 µs, then read 28 bytes. The first 8 are skipped; bytes 8–27 become payload p0..p19.
   - `req` = 0x01 normally. While a boost countdown runs (0x708c0 ≠ 0): 0x0c, or 0x0d if 0x708ca is set.
+  - Live (debug page 2, logger v5): pressing boost sends `0c` exactly **once**, then `0d` on every poll until boost ends. The reply to the `0c` itself is identical to a normal `01` reply (p7 f6, p11 fe, p15 ab). The acknowledgement first appears in the next (`0d`) reply: p7 d6, p11 e8, p15 9d.
 - The exchange runs every 30 ticks: RX at tick 1, TX at tick 15. A TX that succeeds prints "Success!".
 
 ## TX frame `20 d0..d10`
@@ -77,7 +78,7 @@ Starting a timed mode sets bits 4–7 and then clears its own bit, so only one m
 | p18 | **Humidity %**: v = p18>>1, active low and bit-reversed (bit 6 clear = +1 … bit 0 clear = +64). 0 or 127 = sensor fault (Diagnostics "Humidity Sensor" row). Live: 2a → 43 %, ca → 44 %, 4a → 45 %, 8a → 46 %, 0a → 47 %, f2 → 48 % | 0x708cb |
 | p19 | Same encoding as p18; no reader found. Live: 0x54 → 85 | 0x708cc |
 
-The 8 header bytes of every reply (before p0) were 00 in runs 1 and 2. In run 3 (logger v5) they were `60 84 00 e5 c8 c8 24 40` in every reply, which is d1..d8 of the settings frame sent just before. es-lcd ignores them, so whether the MSP430 echoes its receive buffer or something else causes this is still open.
+The 8 header bytes of every reply (before p0) were 00 in runs 1 and 2. In run 3 (logger v5) they were `60 84 00 e5 c8 c8 24 40` in every reply, which is d1..d8 of the settings frame sent just before. es-lcd ignores them. Debug page 2 shows the same 8 bytes in the replies to `01`, `0c` and `0d` alike, so they don't depend on the request: the MSP430 most likely just returns its last receive buffer. An ESP can ignore them.
 
 p8 = p9 = 0xff means "No communications" (every Diagnostics row shows "?" and the comms row a cross). A change in p1, p5, p8, p9 or p16 triggers a redraw.
 
@@ -122,7 +123,7 @@ A touchscreen test: touch the four corners (keys 0x31–0x34) and the centre box
 `msp430lib_get_co2` uses a separate I²C handle (CO2lib_init). It writes `22 00 08 2a` (a Senseair K30-style "read RAM 0x08" command), waits 20 ms, reads 4 bytes, and returns CO2 ppm = b1·256 + b2. No screen in this firmware shows it.
 
 ## Still open
-- p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far. Run 3: pressing speed 3 (boost) on Home sent req 0c and then 0d, which stayed for about 26 minutes (from 158 s to the end), with p11 at e8 throughout; p15 follows as the checksum (ab → 8b → 8d → 9d). p9 stayed f6 (the speed-1 pattern) the whole time, so the p9 speed bits don't reflect boost.
-- Reply header bytes: zero in runs 1–2, but an echo of TX d1..d8 in run 3 (see above).
+- p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far. Run 3: pressing speed 3 (boost) on Home sent req 0c and then 0d, which stayed for about 26 minutes (from 158 s to the end), with p11 at e8 throughout; p15 follows as the checksum (ab → 8b → 8d → 9d). p9 stayed f6 (the speed-1 pattern) the whole time, so the p9 speed bits don't reflect boost; the v5 debug page also shows "Spd 1" during boost. Use p7 bit 0x20 / p11 to detect boost.
+- Reply header bytes: zero in runs 1–2, but an echo of TX d1..d8 from run 3 on, identical for every req (see above).
 - p19 meaning (no reader in es-lcd). The RS485 bus capture posted on the HA forum shows a `3B C2 54 06` message whose byte 2 is also 0x54, so p19 likely mirrors that field.
-- p8 = 0xaa has bit 0x40 clear ("Heater fail"): check what the Settings status line shows on the real unit (possibly no heater fitted).
+- p8 = 0xaa has bit 0x40 clear ("Heater fail"): check what the Settings status line shows on the real unit (possibly no heater fitted). The v5 debug page decodes it as "Flt: Htr", with both fan bits OK.

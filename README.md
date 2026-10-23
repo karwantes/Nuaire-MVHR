@@ -24,7 +24,7 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 
 - The board is a TI DM355 running embedded Linux from an SD card. The whole UI is one binary, `/opt/dvsdk/dm355/es-lcd` (V0.26, Feb 2016).
 - Linux never touches RS485 itself. It polls an MSP430 at I²C address 0x26, and the MSP430 handles the bus to the unit.
-- On a read, the VSC writes `00 req ~req` and then reads 28 bytes. `req` is `01` (normal), `0c` (boost) or `0d` (boost variant).
+- On a read, the VSC writes `00 req ~req` and then reads 28 bytes. `req` is `01` (normal), `0c` (sent once to start boost) or `0d` (every poll while boost runs).
 - On a write, the VSC sends `20 d0..d10 chk`: the settings frame.
 
 ## Things you can use without any hacking
@@ -73,7 +73,7 @@ Images are about 470 MB each, so they are attached to the GitHub Release rather 
 | File | SHA-256 | What |
 |---|---|---|
 | `disk3.img` | `91ad9632ced6ebd1cf56fd6e37cc6e4f9506c5b6c8cce0f3610c588556a555e9` | Stock card as shipped (my unit) |
-| `disk3_i2clog5.img` | `9e22006773472cdcb0381632ca30fed9048523bf17c20b106535c18f91bfbfd1` | Stock + latest logger and debug pages (not yet tested on the unit) |
+| `disk3_i2clog5.img` | `9e22006773472cdcb0381632ca30fed9048523bf17c20b106535c18f91bfbfd1` | Stock + latest logger (v5) and both debug pages, tested on the unit |
 | `card_after_test1.img` | `3dfdf1b2dbcec0672b5457a5992f002ad5055efc802f3ac3ae5ff1f8d3fc8c19` | Card read back after the first logger run |
 | `card_run2.img` | `31fbf75b1c902f42043f4dca52b66814c94fce3bb7ec97ce8a1a5db196ab765a` | Card read back after the second logger run |
 
