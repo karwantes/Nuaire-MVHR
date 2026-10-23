@@ -1,11 +1,18 @@
 """Build a logging/debug SD card image from a copy of a stock VSC card dump.
 
-usage: python mkimg.py <stock.img> <out.img>
+usage: python mkimg.py [--shell] <stock.img> <out.img>
 Run from a folder that has logger/i2clog.so, rootfs_p2/autoexec.bat (extracted from the
 stock card's 2nd partition) and welcomepage_new.png. The stock image is only read.
+
+--shell starts es-lcd in the background with its output discarded, so the boot script
+finishes and init reaches the getty on the serial console (LINUX TERMINAL header,
+115200 8N1). Log in as root (no password on the stock card).
 """
 import struct, sys, shutil, hashlib
-SRC, DST = sys.argv[1], sys.argv[2]
+args = sys.argv[1:]
+SHELL = '--shell' in args
+if SHELL: args.remove('--shell')
+SRC, DST = args
 assert SRC != DST
 P2 = 40960 * 512
 shutil.copyfile(SRC, DST)
@@ -66,7 +73,9 @@ so = open('logger/i2clog.so', 'rb').read()
 rewrite_first_block('/etc/Wireless/RT2870STA/rt3070sta.ko', so)
 # 2. autoexec.bat
 old = open('rootfs_p2/autoexec.bat', 'rb').read()
-new = old.replace(b'./es-lcd\n', b'LD_PRELOAD=/etc/Wireless/RT2870STA/rt3070sta.ko ./es-lcd\n', 1).rstrip() + b'\n'
+run = b'LD_PRELOAD=/etc/Wireless/RT2870STA/rt3070sta.ko ./es-lcd'
+if SHELL: run += b' </dev/null >/dev/null 2>&1 &'
+new = old.replace(b'./es-lcd\n', run + b'\n', 1).rstrip() + b'\n'
 assert new != old
 rewrite_first_block('/autoexec.bat', new, set_size=len(new))
 # 3. boot logo: same-size overwrite, walking direct + single-indirect blocks

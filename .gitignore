@@ -3,3 +3,4 @@
 rootfs_p2/
 __pycache__/
 *.so
+esp/*/build/

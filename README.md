@@ -11,6 +11,7 @@ Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-
 - [x] Status payload decoded: temperatures, RH, fan speed, fault bits, boost acknowledgement.
 - [x] Settings frame decoded: setpoints, airflow % and mode flags.
 - [x] Bus cable wiring measured: red +10 V, blue 0 V, green RS485 A, yellow RS485 B (see [docs/protocol.md](docs/protocol.md#wiring-vsc-to-mrxbox-4-core-bus-cable)).
+- [x] Linux console found: the **LINUX TERMINAL** header next to the SD card (RS232 level, 115200 8N1). A card built with `mkimg.py --shell` gives a root login there; the ESP bridge makes it reachable over WiFi (see [captures/vsc_console_boot.txt](captures/vsc_console_boot.txt)).
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
 - [ ] ESP acting as the controller (replacing the VSC).
@@ -40,6 +41,7 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 |---|---|
 | `docs/protocol.md` | I²C framing, RX status bytes, TX settings frame, menus and ranges, bus wiring, RS485 cross-reference |
 | `docs/images/` | Annotated VSC board photos and the wall box colour label |
+| `esp/vsc-serial-bridge/` | ESP32 WiFi bridge to the VSC's Linux console (browser + telnet) |
 | `logger/i2clog.c` | `LD_PRELOAD` library: logs every I²C exchange to `/i2clog.txt` and adds the debug pages |
 | `logger/build.sh` | Builds `i2clog.so` with `zig cc` (ARM926EJ-S, freestanding) |
 | `tools/mkimg.py` | Builds a logger SD image from a **copy** of a stock card dump |
@@ -65,6 +67,8 @@ To build your own image:
 cd logger && ./build.sh && cd ..
 python tools/mkimg.py stock.img my_logger.img
 ```
+
+Add `--shell` (`python tools/mkimg.py --shell stock.img my_shell.img`) to start `es-lcd` in the background with its console output discarded. The boot script then finishes and you get a `login:` prompt on the serial console; log in as `root`, which has no password.
 
 `mkimg.py` reuses the first blocks of the unused Wi-Fi module `rt3070sta.ko` for the library, adds `LD_PRELOAD` to `autoexec.bat`, and swaps the boot logo. All writes go to the output copy only.
 

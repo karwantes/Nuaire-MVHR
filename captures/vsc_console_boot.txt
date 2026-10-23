@@ -1,0 +1,144 @@
+VSC Linux console capture, 2026-10-23
+LINUX TERMINAL header, RS232 level, 115200 8N1, read with esp/vsc-serial-bridge.
+
+== 1. Stock boot (logger card, es-lcd in the foreground) ==
+--------------------------------------------------
+J43 DM355 SPLASH SD DIRECT KERNEL BOOT SD.p2 FS
+May 23 2012 DM355_MHZ=216 DDR_MHZ=171
+--------------------------------------------------
+Splash Load
+Starting Video
+Kernel Load
+--------------------------------------------------
+J43 DM355 SPLASH SD DIRECT KERNEL BOOT SD.p2 FS
+May 23 2012 DM355_MHZ=216 DDR_MHZ=171
+--------------------------------------------------
+Splash Load
+Starting Video
+Kernel Load
+Starting Kernel...
+Ur .........................................................ei .
+DaVinci I2C DEBUG: 22:32:55 May 20 2012
+INIT: Entering runlevel: 3
+Nuaire Autoexec.bat boot script
+Inserting ads7843 module
+Running main program...
+A470 OSD Demo 
+Mode=640x400
+ScreenSize=153600
+reading setup3.xml
+Reading help.xml
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Interface Error: Failed to get I2C data.
+Init I2C
+Success!
+... (Init I2C / Success! repeats about 10 times a second)
+
+== 2. Shell session (mkimg.py --shell card, logged in as root) ==
+(none) login: root
+
+Welcome to MontaVista(R) Linux(R) Professional Edition 4.0.1 (0502020).
+
+login[343]: root login  on `console'
+
+# uname -a; cat /proc/cmdline; id
+Linux (none) 2.6.10_mvl401 #413 Wed May 23 19:16:35 BST 2012 armv5tejl unknown
+quiet mem=116M console=ttyS0,115200n8 noinitrd root=/dev/mmcblk0p2 rootfstype=ext2 rw ip=off v4l2_video_capture=device:MT9T001 davinci_enc_mngr.ch0_output=LCD davinci_enc_mngr.ch0_mode=640x400 video=davincifb:vid0=320x240x16,2025K@0,0:vid1=320x240x16,2025K@0,0:osd0=320x240x16,1350K@0,0
+uid=0(root) gid=0(root)
+# ps
+  PID  Uid     VmSize Stat Command
+    1 root        520 S   init [3]   
+    2 root            SW< [ksoftirqd/0]
+    3 root            SW< [desched/0]
+    4 root            SW< [events/0]
+    5 root            SW< [khelper]
+   10 root            SW< [kthread]
+   18 root            SW< [kblockd/0]
+   47 root            SW  [khubd]
+  101 root            SW  [pdflush]
+  102 root            SW  [pdflush]
+  104 root            SW< [aio/0]
+  103 root            SW  [kswapd0]
+  183 root            SW  [kseriod]
+  210 root            SW< [dm_spi.0]
+  225 root            SW< [mmcqd]
+  342 root       1512 S   ./es-lcd 
+  343 root        776 S   -sh 
+  349 root        696 R   ps 
+# mount; df
+rootfs on / type rootfs (rw)
+/dev/root on / type ext2 (rw,nogrpid)
+proc on /proc type proc (rw,nodiratime)
+sysfs on /sys type sysfs (rw)
+tmpfs on /tmp type tmpfs (rw)
+usbfs on /proc/bus/usb type usbfs (rw)
+/dev/root on /dev/.static/dev type ext2 (rw,nogrpid)
+none on /dev type tmpfs (rw)
+devpts on /dev/pts type devpts (rw)
+tmpfs on /dev/shm type tmpfs (rw)
+none on /var/run type tmpfs (rw)
+Filesystem           1k-blocks      Used Available Use% Mounted on
+/dev/mmcblk0p2          220399     13839    195181   7% /
+tmpfs                    58020         0     58020   0% /tmp
+/dev/mmcblk0p2          220399     13839    195181   7% /dev/.static/dev
+none                     10240       380      9860   4% /dev
+tmpfs                    58020         0     58020   0% /dev/shm
+none                     58020         4     58016   0% /var/run
+# free; cat /proc/cpuinfo | head -5
+              total         used         free       shared      buffers
+  Mem:       116040        28408        87632            0          256
+ Swap:            0            0            0
+Total:       116040        28408        87632
+Processor	: ARM926EJ-Sid(wb) rev 5 (v5l)
+BogoMIPS	: 107.72
+Features	: swp half thumb fastmult edsp java 
+CPU implementer	: 0x41
+CPU architecture: 5TEJ
+# ls /dev | tr "\n" " "
+MAKEDEV ads7843 cmem console core dm350mmap fb fd full i2c initctl kmem kmsg loop mem mmcblk0 mmcblk0p1 mmcblk0p2 net null port ppp ptmx pts random rd shm sndstat stderr stdin stdout tts tty urandom v4l vc vcc video2 video3 watchdog zero # cat /proc/interrupts; ifconfig -a 2>&1 | head -20
+           CPU0
+  8:       5991   davinci_osd
+  9:          0   seq_arm_interrupt
+ 12:          0   musb_hdrc
+ 16:        887   EDMA Completion
+ 17:          0   EDMA CC Err
+ 18:          0   EDMA TC Error
+ 19:          0   EDMA TC Error
+ 26:       3362   mmc
+ 27:        218   mmc
+ 32:          0   free-run counter
+ 33:          0   high-res timer
+ 35:      10739   system tick
+ 39:      13589   i2c
+ 40:        409   serial
+ 42:          0   dm_spi
+Err:          0
+ifconfig: No usable address families found.
+ifconfig: socket: Function not implemented
+# ls -la /i2clog.txt; lsmod
+-rw-r--r--    1 root     root        63335 Jan  1 00:01 /i2clog.txt
+Module                  Size  Used by    Not tainted
+ads7843 2440 0 - Live 0xbf007000
+dm350mmap 3092 0 - Live 0xbf005000
+cmemk 13720 0 - Live 0xbf000000
+#
