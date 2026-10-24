@@ -15,6 +15,27 @@ Reverse-engineering the Nuaire MRXBOX **VSC / MRX Control** touchscreen, with th
 
 Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-assistant.io/t/nuaire-mrxbox-interface-for-home-assistant/573933) (HA community).
 
+## Home Assistant with an ESP32: start here
+
+This is the way to use the project today. Your VSC stays on the wall and keeps working; Home Assistant gets the unit alongside it.
+
+![VSC LINUX TERMINAL header to MAX3232 module to ESP32](docs/images/vsc-console-wiring.svg)
+
+**How it works**
+
+1. **The card, once.** The VSC runs Linux from an SD card. You take the card out and convert it in a PC card reader with `vscconv.exe`. It adds a small library (`i2clog.so`) to the screen program and lets the boot reach a console login. It backs the card up first and can put the backup back.
+2. **The library** runs inside the screen program. It reports the unit's state in files under `/tmp` (temperatures, humidity, speed, bypass, faults, airflow, setpoints, hours) and watches other `/tmp` files for commands (speed 1/2/3, bypass, airflow %, setpoints, night and holiday mode). The screen keeps working as normal.
+3. **The ESP32** sits on the VSC's **LINUX TERMINAL** header through a MAX3232 module. It logs in as root, reads those files every 20 s and writes them when Home Assistant asks.
+4. **Home Assistant** finds the ESP by MQTT discovery (the Mosquitto add-on) as a device called **MRXBOX**, with controls and sensors. No custom integration and no YAML.
+
+**What you need:** an ESP32 dev board, a 3.3 V MAX3232 module, 7 jumper wires, a 5 V USB supply, a USB SD card reader and a Windows PC.
+
+**What you get:** fan speed 1/2/3, bypass Auto/On/Off and its setpoint, humidity and frost setpoints, night and holiday mode, airflow % for each speed, screen timeout, both temperatures, humidity, running speed, run and filter hours, fault sensors and communication status. Full list: [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt).
+
+**Steps:** [docs/convert-card.md](docs/convert-card.md): parts, wiring, flashing the ESP, converting the card, first boot.
+
+The rest of this page is the research behind it: how the VSC works, the logger image and the protocol.
+
 ## Status
 
 - [x] VSC firmware disassembled; the UI program (`es-lcd`) is mapped.

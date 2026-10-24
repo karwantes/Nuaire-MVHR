@@ -180,6 +180,11 @@ static String mqHost;
 static uint32_t mqLastPoll = 0;
 static volatile uint32_t mqManual = 0;   // last /send; the poll waits 30 s so it can't land inside a typed heredoc
 static int mqBypassTemp = 0;    // last setpoint sent; the unit can't report it
+// The VSC answers each poll with an @S line. After 3 polls with no answer (VSC off, unplugged
+// or not logged in) vsc/vsc_status goes offline: comms shows OFF and the unit's entities unavailable.
+#define MQ_NO_REPLY 3
+static int mqNoReply = 0;
+static bool mqVscOnline = false;
 // Airflow % for supply speed 1/2/3 then extract speed 1/2/3, as /tmp/airflow_state reports it.
 static const char *const AIR_KEY[6] = {"air_s1", "air_s2", "air_s3", "air_e1", "air_e2", "air_e3"};
 static int mqAir[6];
@@ -321,15 +326,25 @@ static void mqEvent(void *, esp_event_base_t, int32_t id, void *data) {
   }
 }
 
-static void mqDiscovery(const char *comp, const char *key, const char *name, const char *extra) {
-  char topic[80], j[640];
+// vscAvty: the entity also needs the VSC to answer (vsc/vsc_status), not only the ESP online.
+static void mqDiscovery(const char *comp, const char *key, const char *name, const char *extra, bool vscAvty = true) {
+  char topic[80], j[768];
   snprintf(topic, sizeof topic, "homeassistant/%s/vsc_bridge/%s/config", comp, key);
   snprintf(j, sizeof j,
-           "{\"name\":\"%s\",\"uniq_id\":\"vsc_bridge_%s\",\"obj_id\":\"mrxbox_%s\","
-           "\"avty_t\":\"" MQ_BASE "/status\",%s,"
+           "{\"name\":\"%s\",\"uniq_id\":\"vsc_bridge_%s\",\"obj_id\":\"mrxbox_%s\",%s,%s,"
            "\"dev\":{\"ids\":[\"vsc_bridge\"],\"name\":\"MRXBOX\",\"mf\":\"Nuaire\",\"mdl\":\"MRXBOX VSC\"}}",
-           name, key, key, extra);
+           name, key, key,
+           vscAvty ? "\"avty\":[{\"t\":\"" MQ_BASE "/status\"},{\"t\":\"" MQ_BASE "/vsc_status\"}],\"avty_mode\":\"all\""
+                   : "\"avty_t\":\"" MQ_BASE "/status\"",
+           extra);
   mqPub(topic, j);
+}
+
+static void mqVsc(bool online) {
+  if (online == mqVscOnline) return;
+  mqVscOnline = online;
+  mqPub(MQ_BASE "/vsc_status", online ? "online" : "offline");
+  if (!online) mqPub(MQ_BASE "/comms", "OFF");
 }
 
 static void mqAnnounceAll() {
@@ -346,7 +361,7 @@ static void mqAnnounceAll() {
               "\"stat_t\":\"" MQ_BASE "/debug\",\"cmd_t\":\"" MQ_BASE "/debug/set\",\"ent_cat\":\"config\",\"ic\":\"mdi:text-box-search\"");
   mqDiscovery("sensor", "debug_log", "Debug log",
               "\"stat_t\":\"" MQ_BASE "/log_batch\",\"val_tpl\":\"{{ value_json.seq }}\",\"json_attr_t\":\"" MQ_BASE "/log_batch\","
-              "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:text-long\"");
+              "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:text-long\"", false);
   mqDiscovery("sensor", "humidity", "Humidity",
               "\"stat_t\":\"" MQ_BASE "/humidity\",\"dev_cla\":\"humidity\",\"stat_cla\":\"measurement\",\"unit_of_meas\":\"%\"");
   mqDiscovery("sensor", "temp_extract", "Extract air temperature",
@@ -356,7 +371,7 @@ static void mqAnnounceAll() {
   mqDiscovery("sensor", "fan_running", "Running fan speed",
               "\"stat_t\":\"" MQ_BASE "/fan_running\",\"ic\":\"mdi:fan-auto\"");
   mqDiscovery("binary_sensor", "comms", "Communication with unit",
-              "\"stat_t\":\"" MQ_BASE "/comms\",\"dev_cla\":\"connectivity\",\"ent_cat\":\"diagnostic\"");
+              "\"stat_t\":\"" MQ_BASE "/comms\",\"dev_cla\":\"connectivity\",\"ent_cat\":\"diagnostic\"", false);
   for (int i = 0; i < 6; i++) {
     char extra[200];
     snprintf(extra, sizeof extra, "\"stat_t\":\"" MQ_BASE "/%s\",\"dev_cla\":\"problem\",\"ent_cat\":\"diagnostic\"", FAULT_KEY[i]);
@@ -395,6 +410,8 @@ static void mqAnnounceAll() {
   mqDiscovery("switch", "holiday", "Holiday mode",
               "\"stat_t\":\"" MQ_BASE "/holiday\",\"cmd_t\":\"" MQ_BASE "/holiday/set\",\"ic\":\"mdi:bag-suitcase\"");
   mqPub(MQ_BASE "/status", "online");
+  mqPub(MQ_BASE "/vsc_status", mqVscOnline ? "online" : "offline");
+  if (!mqVscOnline) mqPub(MQ_BASE "/comms", "OFF");
   if (mqBypassTemp) mqPub(MQ_BASE "/bypass_temp", String(mqBypassTemp).c_str());
   mqLastPoll = 0;   // poll now
 }
@@ -491,6 +508,8 @@ static void mqParse(const char *line) {
   const char *p = strstr(line, "@S");
   if (!p || (p[2] != ' ' && p[2] != 0)) return;
   p += 2;
+  mqNoReply = 0;
+  mqVsc(true);
   bool s2 = strstr(p, "/tmp/speed2"), s3 = strstr(p, "/tmp/speed3");
   bool bon = strstr(p, "/tmp/bypass_on"), boff = strstr(p, "/tmp/bypass_off");
   while (*p == ' ') p++;
@@ -592,6 +611,8 @@ static void mqLoop() {
   if (mqLogBatch.length() && millis() - mqLogT >= MQ_LOG_MS) mqLogFlush();
   if ((!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) && (!mqManual || millis() - mqManual >= 30000)) {
     mqLastPoll = millis();
+    if (mqNoReply >= MQ_NO_REPLY) mqVsc(false);
+    else mqNoReply++;
     vscLine(POLL_CMD);
   }
   static int savedTemp = 0;
