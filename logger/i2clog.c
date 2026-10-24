@@ -304,7 +304,7 @@ static int body_maint(int key)
         return 0;
     }
     U16(0x1e2da) = 0; /* keep the sleep screen away while watching */
-    if (key == 0x68 && nowsec() - dbg_t0 >= 2) { dbg = 0; return SCR_MAINT; }
+    if (key == 0x68 && nowsec() - dbg_t0 >= 2) { dbg = 0; U16(0x1e2da) = U8(0xe200); return SCR_MAINT; } /* countdown again */
     if (key == 0x4e) { page ^= 1; frame(); return 0; } /* logo again: switch page */
     if (nowsec() != dbg_last || nrx != dbg_nrx) draw();
     return 0;
@@ -490,22 +490,37 @@ int ioctl(int fd, unsigned long req, long arg)
 }
 /* Shell speed: creating /tmp/speed2 or /tmp/speed3 starts es-lcd's own timed speed (as the Home
    fan key 0x66 does), so the screen shows it; removing the file goes back to speed 1. Only acts
-   when the files change, so the screen key keeps working. 0x708c0 is the countdown in minutes
-   (es-lcd sends req 0c/0d while it is non-zero), 0x708c2 the timer setting, 0x708ca the 0c/0d
-   selector. */
+   when the files change, so the screen key keeps working. A speed set on the screen, or the timer
+   running out, is written back to the files so the shell sees it. 0x708c0 is the countdown in
+   minutes (es-lcd sends req 0c/0d while it is non-zero), 0x708c2 the timer setting, 0x708ca the
+   0c/0d selector. */
 #define BST_LEFT U16(0x708c0)
 #define BST_MINS U8(0x708c2)
 #define BST_SEL U8(0x708ca)
 static int shell_spd = 1;
 
+static void speed_file(const char *path, int on)
+{
+    if (!on) { sc4(10, (long)path, 0, 0, 0); return; }
+    long fd = sc4(5, (long)path, 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) sc4(6, fd, 0, 0, 0);
+}
+
 static void shell_speed(void)
 {
     int spd = sc4(33, (long)"/tmp/speed3", 0, 0, 0) == 0 ? 3
             : sc4(33, (long)"/tmp/speed2", 0, 0, 0) == 0 ? 2 : 1;
-    if (spd == shell_spd) return;
-    shell_spd = spd;
-    BST_SEL = spd == 3;
-    BST_LEFT = spd > 1 ? (BST_MINS ? BST_MINS : 20) : 0;
+    if (spd != shell_spd) {
+        shell_spd = spd;
+        BST_SEL = spd == 3;
+        BST_LEFT = spd > 1 ? (BST_MINS ? BST_MINS : 20) : 0;
+        return;
+    }
+    int act = BST_LEFT ? (BST_SEL ? 3 : 2) : 1;
+    if (act == shell_spd) return;
+    speed_file("/tmp/speed2", act == 2);
+    speed_file("/tmp/speed3", act == 3);
+    shell_spd = act;
 }
 
 /* Logs every change of the speed countdown and selector, to see what the screen keys do. */
@@ -542,6 +557,28 @@ static void shell_time(void)
                           (t[4] - '0') << 4 | (t[5] - '0'), 0};
     f[5] = ~(f[1] ^ f[2] ^ f[3] ^ f[4]);
     logdata("W", f, 6, sc4(4, i2cfd, (long)f, 6, 0));
+}
+
+/* Clock for the shell: /tmp/clock "HH MM", es-lcd's copy of the MSP430 clock (0x6ab5c hours,
+   0x6ab5e minutes, from the BCD bytes it reads while the speed timer is 0), written when it
+   changes, so the bridge can see the clock and correct it through /tmp/settime. */
+static unsigned clk_last = 0xffffffff;
+
+static void clock_state(void)
+{
+    unsigned c = U16(0x6ab5c) << 16 | U16(0x6ab5e);
+    if (c == clk_last) return;
+    clk_last = c;
+    char line[16], *p = line;
+    if ((c >> 16) < 10) *p++ = '0';
+    p = putdec(p, c >> 16); *p++ = ' ';
+    if ((c & 0xffff) < 10) *p++ = '0';
+    p = putdec(p, c & 0xffff); *p++ = '\n';
+    long fd = sc4(5, (long)"/tmp/clock", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); }
+    char l2[32], *q = l2;
+    stamp(&q); q = putstr(q, "CLOCK "); for (char *s = line; s < p; s++) *q++ = *s;
+    emit(l2, q - l2);
 }
 
 /* Shell bypass: /tmp/bypass_on forces bypass ON (air skips the heat exchanger) by running the User
@@ -642,6 +679,7 @@ static void airflow_state(void)
 #define SLEEP_IMM U8(0xe200)
 #define SCREEN_SAVED "/etc/screen_timeout"
 static int scr_last = -1;
+static unsigned sleep_last = 0xffffffff;
 
 /* minutes from a small file, or -1; the file is deleted when del is set */
 static int screen_read(const char *path, int del)
@@ -673,6 +711,14 @@ static void shell_screen(void)
             long fd = sc4(5, (long)SCREEN_SAVED, 0x1 | 0x40 | 0x200, 0644, 0);
             if (fd >= 0) { sc4(4, fd, (long)s, e - s, 0); sc4(6, fd, 0, 0, 0); sc4(36, 0, 0, 0, 0); }
         }
+    }
+    unsigned sl = SLEEP_CNT | U16(0x1e34a) << 16; /* the countdown and the screen shown */
+    if (sl != sleep_last) { /* debug log: what keeps the screen awake */
+        sleep_last = sl;
+        char l3[40], *r = l3;
+        stamp(&r); r = putstr(r, "SLEEP ");
+        r = putdec(r, sl & 0xffff); *r++ = ' '; r = putdec(r, sl >> 16); *r++ = '\n';
+        emit(l3, r - l3);
     }
     int m = SLEEP_IMM ? SLEEP_IMM - 1 : 0;
     if (m == scr_last) return;
@@ -950,6 +996,7 @@ long write(int fd, const void *buf, unsigned long n)
         airflow_state();
         shell_screen();
         runtime_state();
+        clock_state();
         shell_modes();
         hassos_hold(0);
         log_bst();

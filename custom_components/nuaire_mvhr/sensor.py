@@ -18,6 +18,7 @@ SENSORS = (
      EntityCategory.DIAGNOSTIC, "mdi:timer-outline"),
     ("filter_hours", "Filter hours", SensorDeviceClass.DURATION, SensorStateClass.TOTAL_INCREASING,
      UnitOfTime.HOURS, None, "mdi:air-filter"),
+    ("clock", "Clock", None, None, None, EntityCategory.DIAGNOSTIC, "mdi:clock-outline"),
 )
 
 

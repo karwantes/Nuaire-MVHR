@@ -203,11 +203,23 @@ static const uint8_t FAULT_BYTE[6] = {8, 8, 8, 8, 9, 9}, FAULT_BIT[6] = {0x08, 0
 
 // One console line that reports the state. "@""S" so the echoed command line
 // doesn't look like the answer.
-#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"T\" $(cat /tmp/sensors 2>/dev/null) \"@\"\"R\" $(cat /tmp/runtime 2>/dev/null) \"@\"\"C\" $(cat /tmp/screen_state 2>/dev/null) \"@\"\"M\" $(cat /tmp/modes 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
+#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"T\" $(cat /tmp/sensors 2>/dev/null) \"@\"\"R\" $(cat /tmp/runtime 2>/dev/null) \"@\"\"C\" $(cat /tmp/screen_state 2>/dev/null) \"@\"\"M\" $(cat /tmp/modes 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) \"@\"\"K\" $(cat /tmp/clock 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
 
 static void mqPub(const char *topic, const char *payload, bool retain = true) {
   if (mq && mqConnected) esp_mqtt_client_publish(mq, topic, payload, 0, 0, retain);
 }
+
+// The VSC clock: es-lcd's copy of the MSP430 clock (hours and minutes), which the library writes
+// to /tmp/clock. That clock can stop (one was stuck at 04:00), and with it every per-minute
+// countdown: screen sleep, the speed 2/3 timers, night and holiday. So once NTP time is known and
+// the VSC is more than a minute out, the bridge sets it through /tmp/settime (HHMMDD), at most
+// every 5 minutes. es-lcd only reads the clock at speed 1, so the check waits for two polls in a
+// row at speed 1. The time zone is POSIX TZ, set on the MQTT page (default UK).
+#define CLOCK_TZ    "GMT0BST,M3.5.0/1,M10.5.0"
+#define CLOCK_SET_MS 300000
+static String clockTz;
+static uint32_t clockSetT = 0;
+static int clockSpeed1 = 0;
 
 // Debug log lines also go out once a second as one JSON batch, {"seq":N,"lines":"a\nb"},
 // for the "Debug log" sensor: HA's recorder keeps each batch, so the log can be read
@@ -413,6 +425,8 @@ static void mqAnnounceAll() {
               "\"stat_t\":\"" MQ_BASE "/night\",\"cmd_t\":\"" MQ_BASE "/night/set\",\"ic\":\"mdi:weather-night\"");
   mqDiscovery("switch", "holiday", "Holiday mode",
               "\"stat_t\":\"" MQ_BASE "/holiday\",\"cmd_t\":\"" MQ_BASE "/holiday/set\",\"ic\":\"mdi:bag-suitcase\"");
+  mqDiscovery("sensor", "clock", "Clock",
+              "\"stat_t\":\"" MQ_BASE "/clock\",\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:clock-outline\"");
   mqPub(MQ_BASE "/status", "online");
   mqPub(MQ_BASE "/vsc_status", mqVscOnline ? "online" : "offline");
   if (!mqVscOnline) mqPub(MQ_BASE "/comms", "OFF");
@@ -501,6 +515,25 @@ static void mqSensors(const char *t) {
   }
 }
 
+// "@K HH MM" (/tmp/clock) -> vsc/clock, and set the VSC clock if it is out (see CLOCK_TZ).
+static void mqClock(const char *k, bool speed1) {
+  int h, m;
+  if (!k || sscanf(k + 2, "%d %d", &h, &m) != 2 || h < 0 || h > 23 || m < 0 || m > 59) return;
+  char s[8];
+  snprintf(s, sizeof s, "%02d:%02d", h, m);
+  mqPub(MQ_BASE "/clock", s);
+  clockSpeed1 = speed1 ? clockSpeed1 + 1 : 0;
+  struct tm t;
+  if (clockSpeed1 < 2 || !getLocalTime(&t, 0) || t.tm_year < 120) return;
+  if (clockSetT && millis() - clockSetT < CLOCK_SET_MS) return;
+  int d = abs(t.tm_hour * 60 + t.tm_min - (h * 60 + m));
+  if (min(d, 1440 - d) < 2) return;   // a minute apart is the poll landing on the minute
+  char cmd[40];
+  snprintf(cmd, sizeof cmd, "echo %02d%02d%02d > /tmp/settime", t.tm_hour, t.tm_min, t.tm_mday);
+  vscLine(cmd);
+  clockSetT = millis();
+}
+
 // "@L <log line>" -> vsc/log (only while debug logging is on);
 // "@S 1 @A 18 32 100 18 32 100 /tmp/speed2 /tmp/bypass_on" -> state topics
 static void mqParse(const char *line) {
@@ -523,6 +556,7 @@ static void mqParse(const char *line) {
   mqPub(MQ_BASE "/debug", strstr(p, "/tmp/debug") ? "ON" : "OFF");
   if (*p == '0' || *p == '1') mqPub(MQ_BASE "/bypass_state", *p == '1' ? "ON" : "OFF");
   mqSensors(strstr(p, "@T"));
+  mqClock(strstr(p, "@K"), !s2 && !s3);
   // "@R RUN FILTER" (/tmp/runtime): es-lcd shows the filter icon above 8759 hours (one year)
   unsigned long run, filt;
   const char *r = strstr(p, "@R");
@@ -645,6 +679,7 @@ static const char MQTT_PAGE[] PROGMEM = R"HTML(<!doctype html>
 <input name="port" placeholder="port (1883)" autocomplete="off"><br>
 <input name="user" placeholder="user" autocomplete="off"><br>
 <input name="pass" type="password" placeholder="password"><br>
+<input name="tz" placeholder="time zone, POSIX TZ (empty keeps it; UK by default)" autocomplete="off"><br>
 <button>Save and restart</button></form>
 <p><a href="/" style="color:#9cf">Back to console</a></p></body></html>)HTML";
 
@@ -786,6 +821,7 @@ static void setupWeb() {
     prefs.putUInt("mqport", web.arg("port").length() ? web.arg("port").toInt() : 1883);
     prefs.putString("mquser", web.arg("user"));
     prefs.putString("mqpass", web.arg("pass"));
+    if (web.arg("tz").length()) prefs.putString("tz", web.arg("tz"));
     web.send(200, "text/plain", "Saved. Restarting...");
     delay(500);
     ESP.restart();
@@ -932,6 +968,8 @@ void setup() {
   xTaskCreatePinnedToCore(busTask, "bus", 4096, nullptr, 2, nullptr, 0);
 
   setupWifi();
+  clockTz = prefs.getString("tz", CLOCK_TZ);
+  if (WiFi.status() == WL_CONNECTED) configTzTime(clockTz.c_str(), "pool.ntp.org", "time.google.com");
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.begin();
   setupWeb();

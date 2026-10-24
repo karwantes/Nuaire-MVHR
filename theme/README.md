@@ -145,6 +145,7 @@ For now, HA uses small files on the unit (through the ESP serial bridge in `esp/
 | `touch /tmp/speed3` | Speed 3 (wins over speed 2) |
 | `rm /tmp/speed2 /tmp/speed3` | Back to speed 1 |
 | `echo HHMMDD > /tmp/settime` | Sets the clock (e.g. `143024` = 14:30 on the 24th), then deletes itself |
+| `cat /tmp/clock` | `HH MM`: the unit's clock as es-lcd last read it. es-lcd only reads it at speed 1, so it can lag at speed 2/3. Updated when it changes |
 | `touch /tmp/bypass_on` | Bypass ON: damper open, air skips the heat exchanger (wins over `bypass_off`) |
 | `touch /tmp/bypass_off` | Bypass OFF: damper closed, heat recovery |
 | `rm /tmp/bypass_on /tmp/bypass_off` | Auto: the unit decides from the setpoint |

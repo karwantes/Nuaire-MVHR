@@ -9,9 +9,10 @@ import serial_asyncio_fast as serial_asyncio
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .const import BAUD, DOMAIN, NO_REPLY, POLL_SECONDS, REPLY_TIMEOUT
-from .protocol import POLL_CMD, ConsoleTracker, command, parse_poll
+from .const import BAUD, CLOCK_SET_SECONDS, DOMAIN, NO_REPLY, POLL_SECONDS, REPLY_TIMEOUT
+from .protocol import POLL_CMD, ConsoleTracker, clock_command, command, parse_poll
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ class VscCoordinator(DataUpdateCoordinator[dict]):
         self._no_reply = 0
         self._lock = asyncio.Lock()
         self.bypass_temp: int | None = None   # last setpoint sent; the unit can't report it
+        self._speed1 = 0   # polls in a row at speed 1, where es-lcd reads the clock
+        self._clock_set = 0.0
 
     async def async_connect(self) -> None:
         self._reader, self._writer = await serial_asyncio.open_serial_connection(
@@ -103,11 +106,28 @@ class VscCoordinator(DataUpdateCoordinator[dict]):
                 raise UpdateFailed(f"cannot open {self.port}: {err}") from err
         await self._poll()
         if self._reply.is_set():
+            self._clock_check()
             return self._state
         self._no_reply += 1
         if self._no_reply >= NO_REPLY or not self._state:
             raise UpdateFailed("no answer from the VSC console")
         return self._state
+
+    def _clock_check(self) -> None:
+        """Set the VSC clock to HA's local time when it is more than a minute out, as
+        the ESP bridge does. es-lcd only reads the clock at speed 1, so this waits for
+        two polls in a row at speed 1."""
+        self._speed1 = self._speed1 + 1 if self._state.get("speed") == "1" else 0
+        clock = self._state.get("clock")
+        mono = self.hass.loop.time()
+        if not clock or self._speed1 < 2 or (self._clock_set and mono - self._clock_set < CLOCK_SET_SECONDS):
+            return
+        now = dt_util.now()
+        cmd = clock_command(clock, now.hour, now.minute, now.day)
+        if cmd and self._tracker.shell:
+            _LOGGER.info("VSC clock %s, setting it to %02d:%02d", clock, now.hour, now.minute)
+            self._write_line(cmd)
+            self._clock_set = mono
 
     async def async_send(self, key: str, value) -> None:
         """A change from HA: type the shell line, then the poll so HA sees the result."""

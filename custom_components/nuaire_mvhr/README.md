@@ -66,6 +66,8 @@ These are the same as the MQTT bridge:
   - Filter change due
   - Bypass active
   - Communication with unit
+  - Clock (the VSC's clock). As on the bridge, the integration sets it to HA's local time
+    when it is more than a minute out (requires further testing).
 - **Fault sensors:** supply fan, extract fan, heater, cooler, frost, and test routine required.
 
 Heater fault, Cooler fault and Test routine required still need testing, as on the bridge.

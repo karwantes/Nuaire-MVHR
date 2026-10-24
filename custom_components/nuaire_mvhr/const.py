@@ -7,3 +7,4 @@ BAUD = 115200          # VSC console
 POLL_SECONDS = 20
 REPLY_TIMEOUT = 8      # seconds; a command line ends with "sleep 2" before the poll
 NO_REPLY = 3           # polls with no answer before the entities go unavailable
+CLOCK_SET_SECONDS = 300  # at most one VSC clock correction per 5 minutes
