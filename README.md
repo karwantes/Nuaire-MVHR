@@ -8,6 +8,11 @@ Reverse-engineering the Nuaire MRXBOX **VSC / MRX Control** touchscreen, with th
   <b>If this project saved you time or a new controller, a coffee keeps it going. Thank you!</b>
 </p>
 
+> **Get your MRXBOX into Home Assistant:** convert the VSC's SD card once with
+> `vscconv.exe` (Windows, backs up first) and add an ESP32 on the console header.
+> Step by step, parts list and wiring: **[docs/convert-card.md](docs/convert-card.md)**.
+> Download: [latest release](https://github.com/karwantes/Nuaire-MVHR/releases/latest).
+
 Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-assistant.io/t/nuaire-mrxbox-interface-for-home-assistant/573933) (HA community).
 
 ## Status
@@ -20,6 +25,7 @@ Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-
 - [x] Linux console found: the **LINUX TERMINAL** header next to the SD card (RS232 level, 115200 8N1). A card built with `mkimg.py --shell` gives a root login there; the ESP bridge makes it reachable over WiFi (see [captures/vsc_console_boot.txt](captures/vsc_console_boot.txt)).
 - [x] Custom screen theme (dark) and a **Controlled by HASSOS** tick box that hands control to Home Assistant, with the screen as a manual override (see [theme/README.md](theme/README.md)).
 - [x] Home Assistant through the ESP bridge (MQTT): speed, bypass, airflow %, humidity, both temperatures, running speed, comms and fault sensors, debug log. Heater fault, Cooler fault and Test routine required still need testing (see [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt)).
+- [x] Card converter: `vscconv.exe` converts a stock card in a PC card reader in place, with a checked backup and restore, so no card image needs building (see [docs/convert-card.md](docs/convert-card.md)).
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
 - [ ] ESP acting as the controller (replacing the VSC).
@@ -55,6 +61,8 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 | `theme/README.md` | How the screen theme and HASSOS mode work, and how to make and install your own screens |
 | `theme/darken.py` | Makes a dark set from your card's own screen images |
 | `theme/overview.py` | Contact sheet of every screen in a folder, for checking a set |
+| `docs/convert-card.md` | Step by step: convert the card, wire the ESP, Home Assistant. Parts list and diagram |
+| `tools/vsc-convert/` | `vscconv.py` card converter (backup, convert, restore) and the script that builds `vscconv.exe` |
 | `tools/mkimg.py` | Builds a logger SD image from a **copy** of a stock card dump |
 | `tools/getlog.py` | Extracts `/i2clog.txt` from a card image read back after a run |
 | `tools/armdis.py` | Annotated disassembly of `es-lcd` (pyelftools + capstone) |

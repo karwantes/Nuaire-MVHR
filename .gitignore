@@ -12,3 +12,5 @@ theme/dark/
 my_dark/
 overview.png
 theme/logo.py
+tools/vsc-convert/build/
+tools/vsc-convert/dist/

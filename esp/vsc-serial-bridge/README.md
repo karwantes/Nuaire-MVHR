@@ -109,5 +109,5 @@ Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypa
 
 - There is no U-Boot: the board uses its own "SD direct kernel boot" loader, so the boot can't be interrupted and keys sent during boot do nothing harmful. The kernel runs with `console=ttyS0,115200n8`.
 - On the stock card, `es-lcd` runs in the foreground of the boot script and fills the console with `Init I2C` / `Success!`, so `getty` never starts and there is no login prompt.
-- With a card built by `tools/mkimg.py --shell`, `es-lcd` runs in the background and you get `login:`. Log in as `root` (no password). A full boot log and shell session is in [captures/vsc_console_boot.txt](../../captures/vsc_console_boot.txt).
+- With a card converted by `vscconv.exe` (see [docs/convert-card.md](../../docs/convert-card.md)) or built by `tools/mkimg.py --shell`, `es-lcd` runs in the background and you get `login:`. Log in as `root` (no password). A full boot log and shell session is in [captures/vsc_console_boot.txt](../../captures/vsc_console_boot.txt).
 - Everything you do from a shell is on the live SD card. Experiment on a copy of the card, never the original.

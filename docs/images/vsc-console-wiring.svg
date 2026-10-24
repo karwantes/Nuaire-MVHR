@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 480" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="860" height="480" fill="#ffffff"/>
+
+  <!-- Home Assistant -->
+  <rect x="640" y="20" width="180" height="50" rx="6" fill="#e8f1fb" stroke="#2b6cb0" stroke-width="1.5"/>
+  <text x="730" y="42" text-anchor="middle" font-weight="600" fill="#1a1a1a">Home Assistant</text>
+  <text x="730" y="60" text-anchor="middle" fill="#444">MQTT broker</text>
+  <line x1="730" y1="70" x2="730" y2="130" stroke="#2b6cb0" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="740" y="104" fill="#2b6cb0">WiFi</text>
+
+  <!-- VSC board -->
+  <rect x="20" y="130" width="180" height="200" rx="6" fill="#f4f4f4" stroke="#555" stroke-width="1.5"/>
+  <text x="110" y="152" text-anchor="middle" font-weight="600" fill="#1a1a1a">VSC board</text>
+  <text x="110" y="170" text-anchor="middle" fill="#444">LINUX TERMINAL header</text>
+  <text x="110" y="186" text-anchor="middle" fill="#444">(next to the SD card)</text>
+  <text x="190" y="214" text-anchor="end" fill="#1a1a1a">0V</text>
+  <text x="190" y="254" text-anchor="end" fill="#1a1a1a">TX</text>
+  <text x="190" y="294" text-anchor="end" fill="#1a1a1a">RX</text>
+  <rect x="40" y="300" width="80" height="20" rx="3" fill="#ffffff" stroke="#888"/>
+  <text x="80" y="314" text-anchor="middle" font-size="11" fill="#444">converted SD</text>
+
+  <!-- MAX3232 module -->
+  <rect x="320" y="130" width="200" height="240" rx="6" fill="#f4f4f4" stroke="#555" stroke-width="1.5"/>
+  <text x="420" y="152" text-anchor="middle" font-weight="600" fill="#1a1a1a">MAX3232 module</text>
+  <text x="420" y="170" text-anchor="middle" fill="#444">RS232 ↔ 3.3 V TTL</text>
+  <text x="330" y="214" fill="#1a1a1a">GND</text>
+  <text x="330" y="254" fill="#1a1a1a">RS232 RX in</text>
+  <text x="330" y="294" fill="#1a1a1a">RS232 TX out</text>
+  <text x="510" y="204" text-anchor="end" fill="#1a1a1a">VCC</text>
+  <text x="510" y="244" text-anchor="end" fill="#1a1a1a">GND</text>
+  <text x="510" y="284" text-anchor="end" fill="#1a1a1a">TTL TX (RXD out)</text>
+  <text x="510" y="324" text-anchor="end" fill="#1a1a1a">TTL RX (TXD in)</text>
+
+  <!-- ESP32 -->
+  <rect x="640" y="130" width="180" height="240" rx="6" fill="#f4f4f4" stroke="#555" stroke-width="1.5"/>
+  <text x="730" y="152" text-anchor="middle" font-weight="600" fill="#1a1a1a">ESP32 dev board</text>
+  <text x="730" y="170" text-anchor="middle" fill="#444">vsc-serial-bridge</text>
+  <text x="650" y="204" fill="#1a1a1a">3V3</text>
+  <text x="650" y="244" fill="#1a1a1a">GND</text>
+  <text x="650" y="284" fill="#1a1a1a">GPIO16 (RX)</text>
+  <text x="650" y="324" fill="#1a1a1a">GPIO17 (TX)</text>
+
+  <!-- USB power -->
+  <line x1="730" y1="370" x2="730" y2="410" stroke="#555" stroke-width="2"/>
+  <rect x="650" y="410" width="160" height="40" rx="6" fill="#f4f4f4" stroke="#555" stroke-width="1.5"/>
+  <text x="730" y="435" text-anchor="middle" fill="#1a1a1a">5 V USB supply</text>
+
+  <!-- VSC to MAX3232 (RS232 side) -->
+  <line x1="200" y1="210" x2="320" y2="210" stroke="#1a1a1a" stroke-width="2.5"/>
+  <line x1="200" y1="250" x2="320" y2="250" stroke="#2f855a" stroke-width="2.5"/>
+  <line x1="200" y1="290" x2="320" y2="290" stroke="#c05621" stroke-width="2.5"/>
+  <circle cx="200" cy="210" r="4" fill="#1a1a1a"/><circle cx="320" cy="210" r="4" fill="#1a1a1a"/>
+  <circle cx="200" cy="250" r="4" fill="#2f855a"/><circle cx="320" cy="250" r="4" fill="#2f855a"/>
+  <circle cx="200" cy="290" r="4" fill="#c05621"/><circle cx="320" cy="290" r="4" fill="#c05621"/>
+  <text x="260" y="200" text-anchor="middle" font-size="11" fill="#666">±5 V RS232</text>
+
+  <!-- MAX3232 to ESP (TTL side) -->
+  <line x1="520" y1="200" x2="640" y2="200" stroke="#c53030" stroke-width="2.5"/>
+  <line x1="520" y1="240" x2="640" y2="240" stroke="#1a1a1a" stroke-width="2.5"/>
+  <line x1="520" y1="280" x2="640" y2="280" stroke="#2f855a" stroke-width="2.5"/>
+  <line x1="520" y1="320" x2="640" y2="320" stroke="#c05621" stroke-width="2.5"/>
+  <circle cx="520" cy="200" r="4" fill="#c53030"/><circle cx="640" cy="200" r="4" fill="#c53030"/>
+  <circle cx="520" cy="240" r="4" fill="#1a1a1a"/><circle cx="640" cy="240" r="4" fill="#1a1a1a"/>
+  <circle cx="520" cy="280" r="4" fill="#2f855a"/><circle cx="640" cy="280" r="4" fill="#2f855a"/>
+  <circle cx="520" cy="320" r="4" fill="#c05621"/><circle cx="640" cy="320" r="4" fill="#c05621"/>
+  <text x="580" y="190" text-anchor="middle" font-size="11" fill="#666">3.3 V TTL</text>
+
+  <!-- Notes -->
+  <text x="20" y="400" font-weight="600" fill="#c53030">Never connect the red bus wire (+10 V) to anything here.</text>
+  <text x="20" y="420" fill="#444">The header is RS232 level (about −5 V idle): never wire it straight to the ESP.</text>
+  <text x="20" y="440" fill="#444">Bridge setting with a MAX3232 module: TTL (normal).</text>
+</svg>
