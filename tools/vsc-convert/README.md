@@ -11,20 +11,25 @@ boot script with no shell, and Ctrl-C doesn't reach it. So the card has to come 
 
 1. Checks the card really is a VSC card (MBR layout, ext2 root, `es-lcd` present).
 2. Checks the boot script is stock. Anything else is left alone.
-3. Makes a full backup of the card, reads the card a second time and checks the file,
+3. Checks `es-lcd` is the tested build (by SHA256). `i2clog.so` calls fixed addresses
+   inside it, so with another build the screen may not work. If it differs, nothing is
+   changed unless you override: type `yes` in the menu, or add `--any-eslcd` on the
+   command line. An overridden card **requires further testing**.
+4. Makes a full backup of the card, reads the card a second time and checks the file,
    all by SHA256 (`vsc_backup_<date>.img` plus a `.sha256`).
-4. Patches the root partition in place (26 blocks):
+5. Patches the root partition in place (26 blocks):
    - `i2clog.so` over the first blocks of `/etc/Wireless/RT2870STA/rt3070sta.ko`
      (the wifi module, never loaded on this unit);
    - `/autoexec.bat` starts es-lcd with `LD_PRELOAD` and in the background, so init
      reaches the console login.
-5. Reads every written block back and checks the card now reads as converted.
+6. Reads every written block back and checks the card now reads as converted.
 
 **Restore** writes a backup back over the whole card and reads it all back to check it by
-SHA256. It checks the backup file against its `.sha256` first only if that file sits next to
-it with the same name, so keep the two together. The menu only offers cards it recognises
-as a VSC card; for a blank or replacement card use `restore <disk> <backup.img>` from an
-admin command prompt (no confirmation, **requires further testing**). See
+SHA256. It needs the backup's `.sha256` next to it with the same name, and refuses to
+write if it is missing or doesn't match, so keep the two together. Menu option 3 offers
+cards it recognises as a VSC card. Option 5 restores to a blank or replacement card: it
+lists the removable disks (never the system disk) and asks you to type the disk number
+again before it overwrites anything (**requires further testing** on a real card). See
 [docs/convert-card.md](../../docs/convert-card.md#9-restore-and-recovery).
 
 The backup is saved in the current folder and needs free space the size of the card.
@@ -54,9 +59,11 @@ reader passed through by usbipd-win; a native Linux PC requires further testing.
 vscconv.py list
 vscconv.py status  <disk number | /dev/sdX | file.img>
 vscconv.py backup  <target> [file]
-vscconv.py convert <target>
+vscconv.py convert <target> [--any-eslcd]
 vscconv.py restore <target> <backup.img>
 ```
+
+`status` also says whether es-lcd is the tested build.
 
 ## Tested
 
@@ -67,8 +74,14 @@ vscconv.py restore <target> <backup.img>
 - On the same real card in WSL2: status, backup, restore of the stock backup (read back
   identical, status `stock`), then convert again (26 writes verified). The card then
   matched a converted copy of the stock image bit for bit.
+- es-lcd check, on image copies: a copy with one es-lcd byte changed is refused with
+  nothing written (no backup either), and converts with `--any-eslcd`.
+- Restore checks, on image copies: refused with the `.sha256` missing or wrong (target
+  untouched), restored and verified with the right one.
 - Booting a restored stock card in the VSC, and restoring to a blank or replacement card:
   **requires further testing**.
-- Tested release: vscconv-1.0. The 26 writes are for that release's `i2clog.so`.
+- Tested release: vscconv-1.0. The 26 writes are for that release's `i2clog.so`. The
+  es-lcd check, the required `.sha256` and menu option 5 are in `vscconv.py` but not yet
+  in a release exe.
 
 Step-by-step guide with parts and wiring: [docs/convert-card.md](../../docs/convert-card.md).

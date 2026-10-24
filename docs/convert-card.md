@@ -19,15 +19,15 @@ You need no Linux, no card images and no command line. The tool backs up your ca
 | ESP bridge | `esp/vsc-serial-bridge` from this repository as of 24 October 2026, on an ESP32-WROOM dev board, built with Espressif ESP32 board package 3.3.12 |
 | Home Assistant | Mosquitto broker add-on and the MQTT integration |
 
-**Other VSC firmware versions require further testing.** The converter checks the card's layout, that `es-lcd` is there and that the boot script is stock. It does **not** check which `es-lcd` build is on the card. `i2clog.so` calls fixed addresses inside `es-lcd`, so a different build could misbehave. If yours is different, the backup puts the card back as it was.
+**Other VSC firmware versions require further testing.** The converter checks the card's layout, that `es-lcd` is there and that the boot script is stock. `i2clog.so` calls fixed addresses inside `es-lcd`, so a different build could misbehave. The current `vscconv.py` also checks `es-lcd` is the tested build (by SHA-256) and changes nothing if it isn't, unless you override it (type `yes` in the menu, or `--any-eslcd`). The vscconv-1.0 exe doesn't have this check. If yours is different, the backup puts the card back as it was.
 
 Before you change anything, check that your VSC board looks like [images/pcb_front_annotated.jpg](images/pcb_front_annotated.jpg), with the **LINUX TERMINAL** header next to the SD card.
 
 ### Limits to know before you change the card
 
 - **Restoring your own backup** to the same card is tested: it was written back and read back bit for bit. A restored card booting in the VSC **requires further testing**.
-- The menu can only restore to a card it still recognises as a VSC card. A blank or replacement card needs the command line (see [Restore and recovery](#9-restore-and-recovery)). **Requires further testing.**
-- Keep the backup `.img` **and** its `.sha256` file together, with the names unchanged. The restore only checks the file against its checksum when the `.sha256` sits next to it.
+- Restoring to a blank or replacement card **requires further testing** (see [Restore and recovery](#9-restore-and-recovery)).
+- Keep the backup `.img` **and** its `.sha256` file together, with the names unchanged. The current `vscconv.py` refuses to restore without a matching `.sha256`; the vscconv-1.0 exe only checks it when it is there.
 
 ### What HA does and doesn't change
 
@@ -196,7 +196,7 @@ Change wiring only with the unit and the ESP both unpowered.
 
 Power off, take the card out and start `vscconv.exe`. Press `3` (restore a backup), type or paste the path of your `vsc_backup_<date>.img`, and confirm with `y`. The tool:
 
-- checks the file against its `.sha256`, **if** the `.sha256` is next to it with the same name. If it isn't there, the restore goes ahead without that check;
+- checks the file against its `.sha256`, which must be next to it with the same name. If it is missing or doesn't match, nothing is written (the vscconv-1.0 exe goes ahead without the check when the `.sha256` is missing);
 - writes the whole card;
 - reads the whole card back and checks it against the file. This check always runs.
 
@@ -204,15 +204,17 @@ Power off, take the card out and start `vscconv.exe`. Press `3` (restore a backu
 
 ### A blank, damaged or replacement card
 
-The menu only offers cards it recognises as a VSC card, so it can't restore to a blank card or one whose partitions are damaged. Use the command line instead. **Requires further testing.**
+Menu option 3 only offers cards it recognises as a VSC card. For a blank card or one whose partitions are damaged, use option 5. **Requires further testing.**
 
 1. The new card must be at least as large as the backup (2,002,780,160 bytes for a 2 GB stock card).
-2. Find its disk number: right-click Start → **Disk Management**. Find the card by its size (e.g. "Disk 3, Removable"). **Make sure this is the card.** The restore overwrites the whole disk you give it, and there is no confirmation.
-3. Open **Command Prompt as administrator** in the folder with `vscconv.exe` and the backup, and run:
-   ```
-   vscconv.exe restore 3 vsc_backup_<date>.img
-   ```
-   with your disk number instead of `3`.
+2. Press `5`. It lists disks up to 64 GB, never the system disk. Find the card by its size; if unsure, check in Disk Management (right-click Start).
+3. Pick the disk, give the path of the backup, then type the disk number again to confirm. The whole disk is overwritten.
+
+With the vscconv-1.0 exe, which has no option 5, use the command line from **Command Prompt as administrator** instead (no confirmation, so make sure the number is the card):
+
+```
+vscconv.exe restore 3 vsc_backup_<date>.img
+```
 
 ## 10. Technical details
 
@@ -234,4 +236,5 @@ A listen-only check with a single resistor is in [console-listen-only.md](consol
 - Converted a real card in a USB reader with `vscconv.exe` 1.0 on Windows: backup checked, 26 writes verified. The VSC booted, the bridge logged in and Home Assistant got live data.
 - On Linux (WSL2 Ubuntu, Python 3, card reader passed through with usbipd-win), on the same real card: status read `converted`; a backup was made and checked; the stock backup made by the Windows tool was restored and read back identical (a fresh backup afterwards had the same SHA-256 as the original stock backup), and status read `stock`; the card was then converted again (26 writes verified) and read `converted`. The whole card then matched, bit for bit, a converted copy of the stock image.
 - Restore on image copies of a stock card gives the stock image back bit for bit.
+- `vscconv.py` on image copies: a copy with one `es-lcd` byte changed is refused with nothing written, and converts with `--any-eslcd`; restore is refused with the `.sha256` missing or wrong (target untouched) and works with the right one.
 - **Requires further testing:** booting a restored stock card in the VSC; restoring to a blank or replacement card; other VSC firmware versions; long ESP or HA outages.

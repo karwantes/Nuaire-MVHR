@@ -185,6 +185,10 @@ static int mqBypassTemp = 0;    // last setpoint sent; the unit can't report it
 #define MQ_NO_REPLY 3
 static int mqNoReply = 0;
 static bool mqVscOnline = false;
+// True once a "# " prompt or a poll answer shows the console is at a root shell; false again on a
+// boot banner or a login prompt. Until then the poll only sends Enter: a poll typed during boot or
+// at "login:" would be taken as the user name.
+static bool vscShell = false;
 // Airflow % for supply speed 1/2/3 then extract speed 1/2/3, as /tmp/airflow_state reports it.
 static const char *const AIR_KEY[6] = {"air_s1", "air_s2", "air_s3", "air_e1", "air_e2", "air_e3"};
 static int mqAir[6];
@@ -468,7 +472,7 @@ static void mqHandle(const char *topic, const char *data) {
         cmd += " > /tmp/airflow; sleep 2";   // es-lcd picks it up on its next frame
       }
   }
-  if (!cmd.length()) return;
+  if (!cmd.length() || !vscShell) return;
   vscLine(cmd + "; " POLL_CMD);
   mqLastPoll = millis();
 }
@@ -509,6 +513,7 @@ static void mqParse(const char *line) {
   if (!p || (p[2] != ' ' && p[2] != 0)) return;
   p += 2;
   mqNoReply = 0;
+  vscShell = true;
   mqVsc(true);
   bool s2 = strstr(p, "/tmp/speed2"), s3 = strstr(p, "/tmp/speed3");
   bool bon = strstr(p, "/tmp/bypass_on"), boff = strstr(p, "/tmp/bypass_off");
@@ -551,7 +556,8 @@ static void mqParse(const char *line) {
   mqAirKnown = true;
 }
 
-// Console bytes: assemble lines for mqParse, and log in when "login:" shows up.
+// Console bytes: assemble lines for mqParse, log in when "login:" shows up, and follow
+// whether the console is at a shell (vscShell).
 static void mqConsole(const uint8_t *d, size_t n) {
   static char line[320];
   static size_t len = 0;
@@ -560,6 +566,7 @@ static void mqConsole(const uint8_t *d, size_t n) {
     if (c == '\n' || c == '\r') {
       line[len] = 0;
       if (len) {
+        if (strstr(line, "Starting Kernel") || strstr(line, "INIT: Entering runlevel")) vscShell = false;
         upReply(line);
         mqParse(line);
       }
@@ -568,8 +575,13 @@ static void mqConsole(const uint8_t *d, size_t n) {
     }
     if (len < sizeof line - 1) line[len++] = c;
     if (len >= 6 && !memcmp(line + len - 6, "login:", 6) && mq) {
+      vscShell = false;
       vscLine("root");
-      mqLastPoll = millis() - MQ_POLL_MS + 3000;   // poll 3 s after logging in
+    } else if (len >= 9 && !memcmp(line + len - 9, "Password:", 9)) {
+      vscShell = false;   // the next Enter gives "Login incorrect" and a new "login:"
+    } else if (len == 2 && line[0] == '#' && line[1] == ' ' && !vscShell) {
+      vscShell = true;
+      mqLastPoll = millis() - MQ_POLL_MS + 1000;   // poll 1 s after reaching the shell
     }
   }
 }
@@ -613,7 +625,7 @@ static void mqLoop() {
     mqLastPoll = millis();
     if (mqNoReply >= MQ_NO_REPLY) mqVsc(false);
     else mqNoReply++;
-    vscLine(POLL_CMD);
+    vscLine(vscShell ? POLL_CMD : "");
   }
   static int savedTemp = 0;
   if (mqBypassTemp != savedTemp) {

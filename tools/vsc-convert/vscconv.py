@@ -7,10 +7,12 @@ an image file. Every run that changes a card first makes a full backup and check
     vscconv.py list                 find VSC cards
     vscconv.py status  <target>     stock / converted / unknown
     vscconv.py backup  <target> [file]
-    vscconv.py convert <target>     backup, then patch in place, then verify
-    vscconv.py restore <target> <backup.img>
+    vscconv.py convert <target> [--any-eslcd]
+                                    backup, then patch in place, then verify
+    vscconv.py restore <target> <backup.img>   needs <backup.img>.sha256 next to it
 
 <target> is a disk number (Windows), /dev/sdX (Linux) or an image file.
+convert refuses an es-lcd that isn't the tested build unless --any-eslcd is given.
 
 What convert changes, on the ext2 root partition (nothing else is touched):
   1. the never-loaded wifi module /etc/Wireless/RT2870STA/rt3070sta.ko gets i2clog.so
@@ -22,6 +24,9 @@ import datetime, hashlib, os, struct, sys
 
 P2_LBA = 40960
 KO = '/etc/Wireless/RT2870STA/rt3070sta.ko'
+ESLCD = '/opt/dvsdk/dm355/es-lcd'
+# The es-lcd build i2clog.so was written for (it calls fixed addresses inside it)
+ESLCD_SHA = 'cf180ac6f0642b9035174b59ab07e804966bcbf8e50b8ca00a5f6037a7df14f5'
 STOCK_RUN = b'\n./es-lcd\n'
 CONV_RUN = b'\nLD_PRELOAD=' + KO.encode() + b' ./es-lcd </dev/null >/dev/null 2>&1 &\n'
 MAX_CARD = 64 << 30
@@ -171,9 +176,46 @@ def candidates():
     return found
 
 
+def any_cards():
+    """Every disk up to MAX_CARD that isn't the system disk, VSC or not (for restoring to a blank card)."""
+    found = []
+    if WIN:
+        sysdrive = os.environ.get('SystemDrive', 'C:')[0].upper()
+        names = [str(i) for i in range(32)]
+    else:
+        root = [l.split()[0] for l in open('/proc/mounts') if l.split()[1] == '/']
+        names = ['/dev/' + d for d in sorted(os.listdir('/sys/block'))
+                 if not d.startswith(('loop', 'ram', 'zram', 'dm-', 'sr'))]
+    for n in names:
+        try:
+            dev = open_target(n)
+        except OSError:
+            continue
+        try:
+            if not 0 < dev.size <= MAX_CARD:
+                continue
+            letters = _volumes_on(int(n)) if WIN else []
+            if (WIN and sysdrive in letters) or (not WIN and any(r.startswith(n) for r in root)):
+                continue
+            try:
+                what = 'VSC card, ' + state(Ext2(dev))
+            except (VscError, OSError, struct.error):
+                what = 'not a VSC card'
+            if letters:
+                what += ', drive ' + ' '.join(c + ':' for c in letters)
+            found.append((n, dev.size, what))
+        finally:
+            dev.close()
+    return found
+
+
 # ---------------------------------------------------------------- ext2 (read and in-place patch)
 
 class VscError(Exception):
+    pass
+
+
+class EslcdError(VscError):
     pass
 
 
@@ -195,7 +237,7 @@ class Ext2:
         self.ipg = struct.unpack_from('<I', sb, 40)[0]
         self.isz = struct.unpack_from('<H', sb, 88)[0] or 128
         self.gdt = 2048 if self.bs == 1024 else self.bs
-        self.lookup('/opt/dvsdk/dm355/es-lcd')
+        self.lookup(ESLCD)
 
     def rd(self, off, n):
         a = (self.base + off) // 512 * 512
@@ -213,14 +255,26 @@ class Ext2:
         return struct.unpack_from('<I', ino, 4)[0], struct.unpack_from('<15I', ino, 40)
 
     def file_blocks(self, n, need=None):
-        """Size and the first `need` data blocks (default all; direct + single indirect only)."""
+        """Size and the first `need` data blocks (default all)."""
         size, b = self.inode(n)
         nb = -(-size // self.bs) if need is None else need
         bl = list(b[:12])
-        if nb > 12 and b[12]:
-            bl += struct.unpack('<%dI' % (self.bs // 4), self.rd(b[12] * self.bs, self.bs))
+
+        def ind(blk, depth):
+            ptrs = struct.unpack('<%dI' % (self.bs // 4), self.rd(blk * self.bs, self.bs))
+            if depth == 1:
+                bl.extend(ptrs); return
+            for p in ptrs:
+                if len(bl) >= nb or not p:
+                    return
+                ind(p, depth - 1)
+
+        for depth, blk in ((1, b[12]), (2, b[13]), (3, b[14])):
+            if len(bl) >= nb or not blk:
+                break
+            ind(blk, depth)
         if nb > len(bl):
-            raise VscError('file too large for this tool')
+            raise VscError('file blocks missing')
         return size, bl[:nb]
 
     def lookup(self, path):
@@ -259,6 +313,10 @@ def state(fs):
     if STOCK_RUN in auto and b'LD_PRELOAD' not in auto:
         return 'stock'
     return 'unknown'
+
+
+def eslcd_sha(fs):
+    return hashlib.sha256(fs.read_file(ESLCD)).hexdigest()
 
 
 def plan_convert(fs, so):
@@ -331,7 +389,7 @@ def backup(target, out=None):
         dev.close()
 
 
-def convert(target, so=None):
+def convert(target, so=None, any_eslcd=False):
     so = so or load_so()
     dev = open_target(target)
     try:
@@ -342,6 +400,11 @@ def convert(target, so=None):
             return
         if st != 'stock':
             raise VscError('boot script is not the stock one, not touching it (restore a backup first)')
+        if eslcd_sha(fs) != ESLCD_SHA:
+            if not any_eslcd:
+                raise EslcdError('es-lcd on this card is not the tested build. i2clog.so calls fixed '
+                                 'addresses inside it, so the screen may not work. Nothing was changed.')
+            print('WARNING: es-lcd is not the tested build, converting anyway')
         plan_convert(fs, so)  # fail here, before the backup, if the card can't be patched
     finally:
         dev.close()
@@ -365,17 +428,20 @@ def convert(target, so=None):
 
 
 def restore(target, image):
+    side = image + '.sha256'
+    if not os.path.exists(side):
+        raise VscError('%s is missing. Keep it next to the backup, it is needed to check the backup '
+                       'before writing' % os.path.basename(side))
     src = Image(image)
     try:
         Ext2(src)
+        want = sha_of(src, src.size, 'checking backup file')
+        if open(side).read().split()[0].lower() != want:
+            raise VscError('backup file does not match its .sha256, not writing it')
         dev = open_target(target, write=True)
         try:
             if src.size > dev.size:
-                raise VscError('backup is larger than the card')
-            want = sha_of(src, src.size, 'checking backup file')
-            side = image + '.sha256'
-            if os.path.exists(side) and open(side).read().split()[0] != want:
-                raise VscError('backup file does not match its .sha256')
+                raise VscError('backup is larger than the card (%d > %d bytes)' % (src.size, dev.size))
             done = 0
             while done < src.size:
                 b = src.read(done, min(CHUNK, src.size - done))
@@ -409,24 +475,56 @@ def show(found):
         print('  %-12s %6.2f GB  %s' % (n if not WIN else 'disk ' + n, size / 1e9, st))
 
 
+def restore_any():
+    """Menu 5: restore a backup to any card, blank or not. The disk number has to be typed twice."""
+    cards = any_cards()
+    if not cards:
+        print('no card found (the system disk and disks over %d GB are never listed)' % (MAX_CARD >> 30))
+        return
+    for n, size, what in cards:
+        print('  %-12s %6.2f GB  %s' % (n if not WIN else 'disk ' + n, size / 1e9, what))
+    t = input('which disk (as listed)? ').strip().replace('disk ', '')
+    card = [f for f in cards if f[0] == t]
+    if not card:
+        print('not one of the listed disks'); return
+    img = input('backup .img file: ').strip().strip('"')
+    if not os.path.isfile(img):
+        print('no such file'); return
+    if os.path.getsize(img) > card[0][1]:
+        print('backup is larger than this card (%d > %d bytes)' % (os.path.getsize(img), card[0][1])); return
+    print('EVERYTHING on %s (%.2f GB, %s) will be overwritten with %s.'
+          % (t if not WIN else 'disk ' + t, card[0][1] / 1e9, card[0][2], img))
+    if input('type the disk %s again to go ahead: ' % ('number' if WIN else 'name')).strip().replace('disk ', '') != t:
+        print('not restored'); return
+    restore(t, img)
+
+
 def menu():
     need_admin()
     while True:
         print('\nNuaire VSC card converter')
         found = candidates(); show(found)
-        print('\n  1 convert   2 backup only   3 restore a backup   4 rescan   q quit')
+        print('\n  1 convert   2 backup only   3 restore a backup   4 rescan'
+              '\n  5 restore to a blank or other card   q quit')
         c = input('> ').strip().lower()
         if c == 'q':
             return
-        if c not in '123' or not found:
-            continue
-        t = found[0][0] if len(found) == 1 else input('which card (as listed)? ').strip().replace('disk ', '')
-        if t not in [f[0] for f in found]:
-            print('not one of the listed cards'); continue
         try:
+            if c == '5':
+                restore_any(); continue
+            if c not in ('1', '2', '3') or not found:
+                continue
+            t = found[0][0] if len(found) == 1 else input('which card (as listed)? ').strip().replace('disk ', '')
+            if t not in [f[0] for f in found]:
+                print('not one of the listed cards'); continue
             if c == '1':
                 if input('convert %s? backup is made first [y/N] ' % t).lower() == 'y':
-                    convert(t)
+                    try:
+                        convert(t)
+                    except EslcdError as e:
+                        print('WARNING:', e)
+                        if input('type yes to convert anyway: ').strip().lower() == 'yes':
+                            convert(t, any_eslcd=True)
             elif c == '2':
                 backup(t)
             else:
@@ -440,19 +538,23 @@ def menu():
 def main(a):
     if not a:
         menu(); return
+    any_eslcd = '--any-eslcd' in a
+    a = [x for x in a if x != '--any-eslcd']
     cmd, rest = a[0], a[1:]
     if cmd == 'list':
         show(candidates())
     elif cmd == 'status':
         dev = open_target(rest[0])
         try:
-            print(state(Ext2(dev)))
+            fs = Ext2(dev)
+            print(state(fs))
+            print('es-lcd:', 'tested build' if eslcd_sha(fs) == ESLCD_SHA else 'NOT the tested build')
         finally:
             dev.close()
     elif cmd == 'backup':
         backup(*rest)
     elif cmd == 'convert':
-        convert(rest[0])
+        convert(rest[0], any_eslcd=any_eslcd)
     elif cmd == 'restore':
         restore(rest[0], rest[1])
     else:
