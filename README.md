@@ -57,6 +57,8 @@ The rest of this page is the research behind it: how the VSC works, the logger i
 - [x] Custom screen theme (dark) and a **Controlled by HASSOS** tick box that hands control to Home Assistant, with the screen as a manual override (see [theme/README.md](theme/README.md)).
 - [x] Home Assistant through the ESP bridge (MQTT): speed, bypass, airflow %, humidity, both temperatures, running speed, comms and fault sensors, debug log. Heater fault, Cooler fault and Test routine required still need testing (see [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt)).
 - [x] Card converter: `vscconv.exe` converts a stock card in a PC card reader in place, with a checked backup and restore, so no card image needs building (see [docs/convert-card.md](docs/convert-card.md)).
+- [ ] Home Assistant custom integration with three connection modes: ESP bridge, USB serial dongle on the VSC console (experimental), and a TTL/RS485 tap on the bus (read only).
+- [ ] Bridge authentication: a login for the web page, `/send` and OTA. Until then, keep the bridge on a trusted network.
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
 - [ ] ESP acting as the controller (replacing the VSC).

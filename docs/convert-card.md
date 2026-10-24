@@ -15,11 +15,11 @@ You need no Linux, no card images and no command line. The tool backs up your ca
 | | Tested |
 |---|---|
 | Unit | One MRXBOX with the VSC touchscreen controller (TI DM355 board, SD card in the VSC). This is the only unit tested. |
-| Card converter | `vscconv.exe` from release [vscconv-1.0](https://github.com/karwantes/Nuaire-MVHR/releases/tag/vscconv-1.0), on Windows 11 with a USB card reader |
+| Card converter | `vscconv.exe` from release [vscconv-1.1](https://github.com/karwantes/Nuaire-MVHR/releases/tag/vscconv-1.1), on Windows 11 with a USB card reader (a real card was converted with 1.0; 1.1 adds checks and was tested on image copies) |
 | ESP bridge | `esp/vsc-serial-bridge` from this repository as of 24 October 2026, on an ESP32-WROOM dev board, built with Espressif ESP32 board package 3.3.12 |
 | Home Assistant | Mosquitto broker add-on and the MQTT integration |
 
-**Other VSC firmware versions require further testing.** The converter checks the card's layout, that `es-lcd` is there and that the boot script is stock. `i2clog.so` calls fixed addresses inside `es-lcd`, so a different build could misbehave. The current `vscconv.py` also checks `es-lcd` is the tested build (by SHA-256) and changes nothing if it isn't, unless you override it (type `yes` in the menu, or `--any-eslcd`). The vscconv-1.0 exe doesn't have this check. If yours is different, the backup puts the card back as it was.
+**Other VSC firmware versions require further testing.** The converter checks the card's layout, that `es-lcd` is there and that the boot script is stock. `i2clog.so` calls fixed addresses inside `es-lcd`, so a different build could misbehave. From release 1.1 it also checks `es-lcd` is the tested build (by SHA-256) and changes nothing if it isn't, unless you override it (type `yes` in the menu, or `--any-eslcd`). If yours is different, the backup puts the card back as it was.
 
 Before you change anything, check that your VSC board looks like [images/pcb_front_annotated.jpg](images/pcb_front_annotated.jpg), with the **LINUX TERMINAL** header next to the SD card.
 
@@ -27,7 +27,7 @@ Before you change anything, check that your VSC board looks like [images/pcb_fro
 
 - **Restoring your own backup** to the same card is tested: it was written back and read back bit for bit. A restored card booting in the VSC **requires further testing**.
 - Restoring to a blank or replacement card **requires further testing** (see [Restore and recovery](#9-restore-and-recovery)).
-- Keep the backup `.img` **and** its `.sha256` file together, with the names unchanged. The current `vscconv.py` refuses to restore without a matching `.sha256`; the vscconv-1.0 exe only checks it when it is there.
+- Keep the backup `.img` **and** its `.sha256` file together, with the names unchanged. The restore refuses to write without a matching `.sha256`.
 
 ### What HA does and doesn't change
 
@@ -115,14 +115,15 @@ Later updates can go over WiFi: Tools → Port → network port `vsc-bridge`.
 
 ## 5. Convert the card
 
-1. Download `vscconv.exe` from release [vscconv-1.0](https://github.com/karwantes/Nuaire-MVHR/releases/tag/vscconv-1.0) into a folder with at least 2 GB free. **The backup is saved in the folder you start it from.**
+1. Download `vscconv.exe` from release [vscconv-1.1](https://github.com/karwantes/Nuaire-MVHR/releases/tag/vscconv-1.1) into a folder with at least 2 GB free. **The backup is saved in the folder you start it from.**
 2. Power the unit off at the isolator. Take the SD card out of the VSC board.
 3. Put the card in the card reader. If Windows offers to format it, press **Cancel**. Close any Explorer window showing the card.
 4. Start `vscconv.exe` and accept the admin prompt. It lists each VSC card it finds, for example `disk 3  2.00 GB  stock`. It only lists cards that look like a VSC card. If it says `no VSC card found`, check the reader and press `4` to scan again.
 5. Press `1` (convert). With one card listed it uses that one. With more than one, it asks `which card (as listed)?`: type the disk number shown, checking the size and `stock`. Then press `y`. The tool then:
    - checks that this is a VSC card with the stock boot script (it leaves anything else alone);
+   - checks `es-lcd` is the tested build. If not, it says so and asks you to type `yes` to go on anyway; anything else stops with nothing changed;
    - saves a full backup, `vsc_backup_<date>.img` plus a `.sha256` file. It reads the card twice and checks the file, all by SHA-256. The full path is shown on the `backup ok:` line;
-   - changes a few blocks on the card (26 with release 1.0) and reads each one back.
+   - changes a few blocks on the card (26 with releases 1.0 and 1.1) and reads each one back.
 6. Wait for `converted: 26 writes, all verified. Put the card back in the VSC.` This takes a few minutes; most of it is the backup.
 
    ![vscconv.exe 1.0: the card is found and converted](images/vscconv.png)
@@ -196,7 +197,7 @@ Change wiring only with the unit and the ESP both unpowered.
 
 Power off, take the card out and start `vscconv.exe`. Press `3` (restore a backup), type or paste the path of your `vsc_backup_<date>.img`, and confirm with `y`. The tool:
 
-- checks the file against its `.sha256`, which must be next to it with the same name. If it is missing or doesn't match, nothing is written (the vscconv-1.0 exe goes ahead without the check when the `.sha256` is missing);
+- checks the file against its `.sha256`, which must be next to it with the same name. If it is missing or doesn't match, nothing is written;
 - writes the whole card;
 - reads the whole card back and checks it against the file. This check always runs.
 
@@ -210,7 +211,7 @@ Menu option 3 only offers cards it recognises as a VSC card. For a blank card or
 2. Press `5`. It lists disks up to 64 GB, never the system disk. Find the card by its size; if unsure, check in Disk Management (right-click Start).
 3. Pick the disk, give the path of the backup, then type the disk number again to confirm. The whole disk is overwritten.
 
-With the vscconv-1.0 exe, which has no option 5, use the command line from **Command Prompt as administrator** instead (no confirmation, so make sure the number is the card):
+The command line does the same with no confirmation, so make sure the number is the card (**Command Prompt as administrator**):
 
 ```
 vscconv.exe restore 3 vsc_backup_<date>.img
@@ -223,7 +224,7 @@ vscconv.exe restore 3 vsc_backup_<date>.img
 - The first 24 KB of `/etc/Wireless/RT2870STA/rt3070sta.ko`, the wifi driver, which this unit never loads, are replaced by `i2clog.so` (built from [logger/i2clog.c](../logger/i2clog.c)). The file keeps its size and place.
 - `/autoexec.bat` starts the screen program with `LD_PRELOAD` and in the background, so the boot reaches the console login.
 
-The conversion itself writes nothing else. When the card runs, settings changed from HA or the screen are saved on it as usual (es-lcd's `setup3`, plus `/etc/modes` and `/etc/screen_timeout`). The boot logo stays stock. The size and number of writes are for release 1.0; a later `i2clog.so` can change them.
+The conversion itself writes nothing else. When the card runs, settings changed from HA or the screen are saved on it as usual (es-lcd's `setup3`, plus `/etc/modes` and `/etc/screen_timeout`). The boot logo stays stock. The size and number of writes are for releases 1.0 and 1.1; a later `i2clog.so` can change them.
 
 The tool is in [tools/vsc-convert](../tools/vsc-convert/README.md); its Python source runs on Linux too.
 

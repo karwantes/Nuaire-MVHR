@@ -80,8 +80,8 @@ vscconv.py restore <target> <backup.img>
   untouched), restored and verified with the right one.
 - Booting a restored stock card in the VSC, and restoring to a blank or replacement card:
   **requires further testing**.
-- Tested release: vscconv-1.0. The 26 writes are for that release's `i2clog.so`. The
-  es-lcd check, the required `.sha256` and menu option 5 are in `vscconv.py` but not yet
-  in a release exe.
+- Release vscconv-1.1 (exe), on an image copy: status, es-lcd check, backup, convert (26
+  writes verified), and restore refused without the `.sha256`. Same `i2clog.so` as 1.0,
+  so the same 26 writes.
 
 Step-by-step guide with parts and wiring: [docs/convert-card.md](../../docs/convert-card.md).
