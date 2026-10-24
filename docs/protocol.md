@@ -26,8 +26,8 @@ Decoded from the `es-lcd` disassembly. `S0` means the 32-bit settings word at 0x
 | 30 (key "s") | Bypass "disable" timer (forces heat recovery) | 0 or 480 min | | 0x1e31c | d0 & 0x08 |
 | 21 Frost protection | Frost level | 0 to −5 / 1 | – | 0x708c4 (s16); S0 bits 28–31 = −value | d3 >> 4 |
 | 21 (key "s") | Frost timer toggle | 0 or 480 | | 0x1e31e | (local) |
-| 8 Air Flow Supply | 3 speeds | each 0–100 % / 1, speed1 ≤ speed2 | – | 0x1e2af / 0x1e2ae / 0x1e2ad | 0x708ac bytes 2 / 3 / 0, value << 1 |
-| 9 Air Flow Extract | 3 speeds | same | – | (same pattern) | remaining 0x708ac bytes |
+| 8 Air Flow Supply | 3 speeds | each 0–100 % / 1, speed1 ≤ speed2 (rule of the screen menu only; `/tmp/airflow` doesn't apply it) | – | 0x1e2af / 0x1e2ae / 0x1e2ad | 0x708ac bytes 2 / 3 / 0, value << 1 |
+| 9 Air Flow Extract | 3 speeds | same | – | 0x1e2ac / 0x1e2ab / 0x1e2aa | 0x708ac bytes 4 / 5 / 1, value << 1 |
 | 6 Rising Boost | Enable | Yes / No | | S0 bit 6 (0 = Yes) | d0 & 0x40 (active low) |
 | 5 Boost Timer | Boost duration | 1–59 min; 60 = "None" (no limit) | | 0x708c2 | (local timer) |
 | 15 Night mode | Duration | 4–8 h | | 0x1e2dd; running timer 0x1e324 = h × 60 min | d0 & 0x10 (active low) |
@@ -65,7 +65,7 @@ So:
 - **p9 0x08 = 1 means the unit is in bypass.** es-lcd never reads it. In the last state the unit's **HX Bypass** status LED was lit (top LED in Fig 21 of Nuaire I&M 671797).
 - **p9 0x08 is the unit's decision, not the damper's position.** It changed within about 1 s of the Commissioning disable and re-enable, but only 63 s after the override ended (the unit re-checking the setpoint once a minute). A wax actuator can't move in 1 s. No other byte from the unit tracks the bypass, so this is the best status available.
 - **How es-lcd builds the bits:** byFsa rebuilds d0 every pass from the timers. 0x1e31c running clears 0x08; 0x1e320 running clears 0x80 (after setting bits 4–6); 0x1e31e running clears 0x04. The timers count down once a minute, and HASSOS mode holds them.
-- **Shell control** (i2clog.so, see `theme/README.md`): `/tmp/bypass_on` runs 0x1e320 (720 min), `/tmp/bypass_off` runs 0x1e31c (480 min), neither = auto. `/tmp/bypasstemp` writes the setpoint into S0 (0x6ab71, sent as d1). `/tmp/bypass_state` holds p9 0x08 as `1`/`0`, from replies with a good checksum.
+- **Shell control** (i2clog.so, see `theme/README.md`): `/tmp/bypass_on` runs 0x1e320 (720 min), `/tmp/bypass_off` runs 0x1e31c (480 min), neither = auto. `/tmp/bypasstemp` writes the setpoint into S0 (0x6ab71, sent as d1). `/tmp/bypass_state` holds p9 0x08 as `1`/`0`, from replies with a good checksum. `/tmp/airflow` ("S1 S2 S3 E1 E2 E3" in %) writes 0x708ac (bit 0 kept) and the 0x1e2aa–af screen values; `/tmp/airflow_state` reports 0x708ac in the same order.
 
 ## I²C framing (MSP430 at 0x26)
 - **Write (TX):** `cmd, data[0..n-1], chk` where `chk = ~(data[0] ^ … ^ data[n-1])`. The settings frame is `cmd 0x20`, n = 11. A 100 µs pause follows.
@@ -82,7 +82,7 @@ So:
 | d2 | Humidity setpoint << 1 |
 | d3 | (−frost level) << 4 |
 | d4 | Checksum `~(d0^d1^d2^d3)` |
-| d5..d10 | Airflow bytes 0x708ac[0..5], each %·2 (supply/extract × 3 speeds) |
+| d5..d10 | Airflow bytes 0x708ac[0..5], each %·2: supply speed 3, extract speed 3, supply speed 1, supply speed 2, extract speed 1, extract speed 2 |
 
 Starting a timed mode sets bits 4–7 and then clears its own bit, so only one mode is active at a time.
 

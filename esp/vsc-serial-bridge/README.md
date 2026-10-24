@@ -55,6 +55,7 @@ A second input listens to the bus between the VSC and the MRXBOX. Use a **3.3 V 
 - **Browser:** `http://vsc-bridge.local/` (or the IP). You get the live log (last 16 KB), a line to send commands, Ctrl-C and Enter buttons, a baud rate selector, a **TX on/off** switch and the **RS232 (inverted) / TTL (normal)** polarity switch, which is saved across reboots. With TX off, the bridge only listens and nothing reaches the VSC. TX goes back to on after the ESP restarts.
 - **Telnet:** PuTTY, connection type **Raw**, host `vsc-bridge.local`, port 23. One client at a time.
 - **Plain log:** `http://vsc-bridge.local/log`. **Status JSON:** `/status`.
+- **Upload a file to the VSC:** on the main page pick a file, type where it goes (for example `/k8.so`) and press Upload. Or from a PC: `curl -F f=@k8.so "http://vsc-bridge.local/upload?to=/k8.so"`, then `GET /upload` until `state` is `ok`. The bridge types the file to the shell (needs a root prompt and TX on), decodes it to `<path>.up` and renames it over `<path>`, so replacing a file in use is safe. It then checks the unit's md5 against its own. Up to 64 KB; about 15 s for 20 KB. The MQTT poll and `/send` wait while it runs.
 - **RS485 bus:** `http://vsc-bridge.local/bus`, or raw TCP port **2323** (read only). One line per frame: seconds since the ESP booted, ms since the previous frame, then the bytes in hex. A frame ends after 20 ms of silence. The default is 1200 baud with bits shown **MSB first**, because the bus sends bytes MSB first and a UART receives them bit-reversed (from the HA forum capture). Both settings are on the page and saved across reboots. Plain text at `/buslog`.
 
 The default is 115200 8N1, the usual DM355 console speed. If the log shows garbage, try other rates from the dropdown.
@@ -69,11 +70,23 @@ The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `l
    - **Bypass** (select Auto/On/Off)
    - **Bypass setpoint** (15–30 °C). The unit can't report it, so HA shows the last value sent. A VSC restart goes back to the stored value.
    - **Bypass active** (the unit's decision, `/tmp/bypass_state`)
+   - **Supply / Extract speed 1/2/3 airflow** (1–100 %, under Configuration). Not saved on the VSC, so a restart goes back to the commissioned values.
+   - **Debug logging** (switch, under Configuration). Off by default and off again after a VSC restart. When on, `i2clog.so` writes its log to `/i2clog.txt` and the bridge publishes each line to `vsc/log` (not retained). To watch it: Settings → Devices & services → MQTT → Configure → Listen to a topic `vsc/log`.
+   - **Debug log** (sensor, under Diagnostic). Once a second the bridge also sends the new log lines as one batch to `vsc/log_batch`. The state is the batch number and the `lines` attribute holds the lines. HA's recorder keeps every batch, so the log can be read back from the sensor's history (for example with the history API or an MCP tool), not only watched live. The text is in the `lines` attribute (open the sensor and expand Attributes). To show it on a dashboard, add a Markdown card with this content:
+
+     ~~~jinja
+     {% set l = state_attr('sensor.mrxbox_debug_log', 'lines') %}
+     {% if is_state('switch.mrxbox_debug_logging', 'on') and l %}
+     ```
+     {{ l }}
+     ```
+     {% else %}Debug logging is off.{% endif %}
+     ~~~
 
    ![MRXBOX device in Home Assistant](../../docs/images/ha-mrxbox-device.png)
-3. The bridge types shell lines on the console: a state poll every 20 s and the `/tmp` file commands. If it sees `login:` it logs in as root. Those lines show up in the console log and any telnet session.
+3. The bridge types shell lines on the console: a state poll every 20 s and the `/tmp` file commands. If it sees `login:` it logs in as root. Those lines show up in the console log and any telnet session. The poll waits while `/send` is in use (30 s after the last line), so it can't break into a typed upload.
 
-Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, each with `/set` where HA can write; `vsc/status` is online/offline).
+Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, `vsc/air_s1`…`vsc/air_s3`, `vsc/air_e1`…`vsc/air_e3`, `vsc/debug`, each with `/set` where HA can write; `vsc/log` carries the debug log, one line per message, and `vsc/log_batch` the same lines as JSON batches; `vsc/status` is online/offline).
 
 ## Things to know
 

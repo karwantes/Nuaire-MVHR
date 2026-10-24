@@ -29,6 +29,7 @@
 #include <Preferences.h>
 #include "driver/uart.h"
 #include "mqtt_client.h"
+#include <MD5Builder.h>
 
 // WiFi credentials are not in the code: on first boot (or if the saved network
 // can't be joined) the ESP starts access point HOSTNAME / AP_PASS, and
@@ -177,20 +178,123 @@ static QueueHandle_t mqQueue;
 static volatile bool mqConnected = false, mqAnnounce = false;
 static String mqHost;
 static uint32_t mqLastPoll = 0;
+static volatile uint32_t mqManual = 0;   // last /send; the poll waits 30 s so it can't land inside a typed heredoc
 static int mqBypassTemp = 0;    // last setpoint sent; the unit can't report it
+// Airflow % for supply speed 1/2/3 then extract speed 1/2/3, as /tmp/airflow_state reports it.
+static const char *const AIR_KEY[6] = {"air_s1", "air_s2", "air_s3", "air_e1", "air_e2", "air_e3"};
+static int mqAir[6];
+static bool mqAirKnown = false;
 
 // One console line that reports the state. "@""S" so the echoed command line
 // doesn't look like the answer.
-#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off 2>/dev/null)"
+#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
 
 static void mqPub(const char *topic, const char *payload, bool retain = true) {
   if (mq && mqConnected) esp_mqtt_client_publish(mq, topic, payload, 0, 0, retain);
+}
+
+// Debug log lines also go out once a second as one JSON batch, {"seq":N,"lines":"a\nb"},
+// for the "Debug log" sensor: HA's recorder keeps each batch, so the log can be read
+// back from HA history. Kept under HA's 16 KB attribute limit.
+#define MQ_LOG_MS   1000
+#define MQ_LOG_MAX  3500
+static String mqLogBatch;
+static uint32_t mqLogT = 0, mqLogSeq = 0;
+
+static void mqLogFlush() {
+  if (!mqLogBatch.length()) return;
+  String j = "{\"seq\":" + String(++mqLogSeq) + ",\"lines\":\"" + mqLogBatch + "\"}";
+  mqPub(MQ_BASE "/log_batch", j.c_str(), false);
+  mqLogBatch = "";
+}
+
+static void mqLogAdd(const char *s) {
+  if (mqLogBatch.length() > MQ_LOG_MAX) mqLogFlush();
+  if (mqLogBatch.length()) mqLogBatch += "\\n";
+  else mqLogT = millis();
+  for (; *s; s++) {
+    if (*s == '"' || *s == '\\') mqLogBatch += '\\';
+    if ((uint8_t)*s >= 0x20) mqLogBatch += *s;
+  }
 }
 
 static void vscLine(const String &s) {
   vscWrite((const uint8_t *)s.c_str(), s.length());
   const uint8_t cr = '\r';
   vscWrite(&cr, 1);
+}
+
+// ---- File upload to the unit ----
+// POST /upload?to=/path with a file: the ESP types it to the shell as a uuencoded
+// heredoc, decodes it to <to>.up, renames it over <to> (safe for a file in use)
+// and checks the unit's md5 against its own. GET /upload reports progress.
+#define UP_MAX      65536
+#define UP_LINE_MS  30      // between heredoc lines, so the unit's tty keeps up
+#define UP_WAIT_MS  20000   // for the md5 reply
+
+static uint8_t *upBuf = nullptr;
+static size_t upLen = 0, upPos = 0;
+static bool upFull = false, upHead = false;
+static int upState = 0;          // 0 idle, 1 sending, 2 waiting for the md5
+static uint32_t upT = 0;
+static String upTo, upMd5, upUnitMd5, upResult = "idle";
+
+static bool upPathOk(const String &p) {
+  if (p.length() < 2 || p.length() > 100 || p[0] != '/') return false;
+  for (size_t i = 0; i < p.length(); i++) {
+    char c = p[i];
+    if (!isalnum((unsigned char)c) && c != '/' && c != '.' && c != '_' && c != '-') return false;
+  }
+  return true;
+}
+
+static void upStep() {
+  if (!upState) return;
+  uint32_t now = millis();
+  mqManual = now;   // the MQTT poll stays away until 30 s after the upload
+  if (upState == 2) {
+    if (now - upT > UP_WAIT_MS) { upResult = "no reply from the unit"; upState = 0; }
+    return;
+  }
+  if (now - upT < UP_LINE_MS) return;
+  upT = now;
+  if (!upHead) {
+    vscLine("cat > /tmp/up.uu <<'XEOF'");
+    vscLine("begin 644 " + upTo + ".up");
+    upHead = true;
+    return;
+  }
+  if (upPos < upLen) {
+    size_t n = min((size_t)45, upLen - upPos);
+    char l[64];
+    int k = 0;
+    l[k++] = 32 + n;
+    for (size_t i = 0; i < n; i += 3) {
+      uint8_t a = upBuf[upPos + i], b = i + 1 < n ? upBuf[upPos + i + 1] : 0, c = i + 2 < n ? upBuf[upPos + i + 2] : 0;
+      uint8_t q[4] = {(uint8_t)(a >> 2), (uint8_t)((a << 4 | b >> 4) & 63), (uint8_t)((b << 2 | c >> 6) & 63), (uint8_t)(c & 63)};
+      for (int j = 0; j < 4; j++) l[k++] = q[j] ? q[j] + 32 : '`';
+    }
+    l[k] = 0;
+    vscLine(l);
+    upPos += n;
+    return;
+  }
+  vscLine("`");
+  vscLine("end");
+  vscLine("XEOF");
+  vscLine("uudecode /tmp/up.uu && mv " + upTo + ".up " + upTo + "; rm -f /tmp/up.uu; echo \"@\"\"U $(md5sum < " + upTo + ")\"");
+  free(upBuf);
+  upBuf = nullptr;
+  upState = 2;
+  upResult = "checking";
+}
+
+// "@U <md5>  -" from the unit ends the upload.
+static void upReply(const char *line) {
+  if (upState != 2 || line[0] != '@' || line[1] != 'U' || line[2] != ' ') return;
+  upUnitMd5 = String(line + 3).substring(0, 32);
+  upResult = upUnitMd5 == upMd5 ? "ok" : "md5 mismatch";
+  upState = 0;
 }
 
 static void mqEvent(void *, esp_event_base_t, int32_t id, void *data) {
@@ -231,6 +335,20 @@ static void mqAnnounceAll() {
               "\"unit_of_meas\":\"°C\",\"mode\":\"box\",\"ic\":\"mdi:thermometer\"");
   mqDiscovery("binary_sensor", "bypass_state", "Bypass active",
               "\"stat_t\":\"" MQ_BASE "/bypass_state\",\"ic\":\"mdi:valve-open\"");
+  mqDiscovery("switch", "debug", "Debug logging",
+              "\"stat_t\":\"" MQ_BASE "/debug\",\"cmd_t\":\"" MQ_BASE "/debug/set\",\"ent_cat\":\"config\",\"ic\":\"mdi:text-box-search\"");
+  mqDiscovery("sensor", "debug_log", "Debug log",
+              "\"stat_t\":\"" MQ_BASE "/log_batch\",\"val_tpl\":\"{{ value_json.seq }}\",\"json_attr_t\":\"" MQ_BASE "/log_batch\","
+              "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:text-long\"");
+  for (int i = 0; i < 6; i++) {
+    char name[40], extra[256];
+    snprintf(name, sizeof name, "%s speed %d airflow", i < 3 ? "Supply" : "Extract", i % 3 + 1);
+    snprintf(extra, sizeof extra,
+             "\"stat_t\":\"" MQ_BASE "/%s\",\"cmd_t\":\"" MQ_BASE "/%s/set\",\"min\":1,\"max\":100,\"step\":1,"
+             "\"unit_of_meas\":\"%%\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:%s\"",
+             AIR_KEY[i], AIR_KEY[i], i < 3 ? "fan-chevron-down" : "fan-chevron-up");
+    mqDiscovery("number", AIR_KEY[i], name, extra);
+  }
   mqPub(MQ_BASE "/status", "online");
   if (mqBypassTemp) mqPub(MQ_BASE "/bypass_temp", String(mqBypassTemp).c_str());
   mqLastPoll = 0;   // poll now
@@ -259,14 +377,34 @@ static void mqHandle(const char *topic, const char *data) {
       mqBypassTemp = v;
       mqPub(MQ_BASE "/bypass_temp", String(v).c_str());
     }
+  } else if (t == MQ_BASE "/debug/set") {
+    if (d == "ON") cmd = "touch /tmp/debug";
+    else if (d == "OFF") cmd = "rm -f /tmp/debug";
+  } else if (t.startsWith(MQ_BASE "/air_") && t.endsWith("/set") && mqAirKnown) {
+    // The unit takes all six at once; the poll then puts HA back to what the unit has.
+    int v = (int)d.toFloat();
+    for (int i = 0; i < 6; i++)
+      if (t == String(MQ_BASE "/") + AIR_KEY[i] + "/set" && v >= 1 && v <= 100) {
+        int a[6];
+        for (int k = 0; k < 6; k++) a[k] = k == i ? v : mqAir[k];
+        cmd = "echo";
+        for (int k = 0; k < 6; k++) cmd += " " + String(a[k]);
+        cmd += " > /tmp/airflow; sleep 2";   // es-lcd picks it up on its next frame
+      }
   }
   if (!cmd.length()) return;
   vscLine(cmd + "; " POLL_CMD);
   mqLastPoll = millis();
 }
 
-// "@S 1 /tmp/speed2 /tmp/bypass_on" -> state topics
+// "@L <log line>" -> vsc/log (only while debug logging is on);
+// "@S 1 @A 18 32 100 18 32 100 /tmp/speed2 /tmp/bypass_on" -> state topics
 static void mqParse(const char *line) {
+  if (line[0] == '@' && line[1] == 'L' && line[2] == ' ') {
+    mqPub(MQ_BASE "/log", line + 3, false);
+    if (mqConnected) mqLogAdd(line + 3);
+    return;
+  }
   const char *p = strstr(line, "@S");
   if (!p || (p[2] != ' ' && p[2] != 0)) return;
   p += 2;
@@ -275,18 +413,33 @@ static void mqParse(const char *line) {
   while (*p == ' ') p++;
   mqPub(MQ_BASE "/speed", s3 ? "3" : s2 ? "2" : "1");
   mqPub(MQ_BASE "/bypass", bon ? "On" : boff ? "Off" : "Auto");
+  mqPub(MQ_BASE "/debug", strstr(p, "/tmp/debug") ? "ON" : "OFF");
   if (*p == '0' || *p == '1') mqPub(MQ_BASE "/bypass_state", *p == '1' ? "ON" : "OFF");
+  const char *a = strstr(p, "@A");
+  if (!a) return;
+  int v[6];
+  if (sscanf(a + 2, "%d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return;
+  for (int i = 0; i < 6; i++) {
+    mqAir[i] = v[i];
+    char topic[24];
+    snprintf(topic, sizeof topic, MQ_BASE "/%s", AIR_KEY[i]);
+    mqPub(topic, String(v[i]).c_str());
+  }
+  mqAirKnown = true;
 }
 
 // Console bytes: assemble lines for mqParse, and log in when "login:" shows up.
 static void mqConsole(const uint8_t *d, size_t n) {
-  static char line[160];
+  static char line[320];
   static size_t len = 0;
   for (size_t i = 0; i < n; i++) {
     char c = (char)d[i];
     if (c == '\n' || c == '\r') {
       line[len] = 0;
-      if (len) mqParse(line);
+      if (len) {
+        upReply(line);
+        mqParse(line);
+      }
       len = 0;
       continue;
     }
@@ -317,13 +470,14 @@ static void setupMqtt() {
   c.session.last_will.msg = "offline";
   c.session.last_will.retain = 1;
   c.session.keepalive = 30;
+  c.buffer.out_size = 4096;   // a log batch in one message
   mq = esp_mqtt_client_init(&c);
   esp_mqtt_client_register_event(mq, MQTT_EVENT_ANY, mqEvent, nullptr);
   esp_mqtt_client_start(mq);
 }
 
 static void mqLoop() {
-  if (!mq) return;
+  if (!mq || upState) return;   // HA commands wait until an upload is done
   MqMsg m;
   while (xQueueReceive(mqQueue, &m, 0) == pdTRUE) mqHandle(m.topic, m.data);
   if (!mqConnected) return;
@@ -331,7 +485,8 @@ static void mqLoop() {
     mqAnnounce = false;
     mqAnnounceAll();
   }
-  if (!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) {
+  if (mqLogBatch.length() && millis() - mqLogT >= MQ_LOG_MS) mqLogFlush();
+  if ((!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) && (!mqManual || millis() - mqManual >= 30000)) {
     mqLastPoll = millis();
     vscLine(POLL_CMD);
   }
@@ -379,7 +534,18 @@ input,select,button{font-size:15px;margin:2px}
 <button onclick="post('/clear')">Clear log</button>
 <label><input type="checkbox" id="fol" checked>follow</label>
 <a href="/bus" style="color:#9cf">RS485 bus</a>
+<form id="uf">Upload to unit: <input type="file" id="uff"> as <input id="uto" placeholder="/path/on/unit" autocomplete="off">
+<button>Upload</button> <span id="ust"></span></form>
 <script>
+document.getElementById('uf').onsubmit=async e=>{e.preventDefault();
+ const f=document.getElementById('uff').files[0],to=document.getElementById('uto').value,st=document.getElementById('ust');
+ if(!f||!to){st.textContent='pick a file and a path';return}
+ const d=new FormData();d.append('f',f);
+ const r=await fetch('/upload?to='+encodeURIComponent(to),{method:'POST',body:d});
+ st.textContent=await r.text();if(!r.ok)return;
+ const t=setInterval(async()=>{const s=await (await fetch('/upload')).json();
+  st.textContent=s.state+'  '+s.sent+'/'+s.size+(s.unit_md5?'  unit md5 '+s.unit_md5:'');
+  if(!/^(sending|checking)/.test(s.state))clearInterval(t)},1000)};
 let tx=true,inv=true;
 const l=document.getElementById('l');
 function post(u){return fetch(u,{method:'POST'}).then(upd)}
@@ -510,7 +676,53 @@ static void setupWeb() {
     web.send(200, "text/plain", "ok");
   });
   web.on("/status", HTTP_GET, handleStatus);
+  // curl -F f=@file 'http://<bridge>/upload?to=/path', then GET /upload until "ok"
+  web.on("/upload", HTTP_GET, [] {
+    String j = "{\"state\":\"" + upResult + "\",\"to\":\"" + upTo + "\",\"sent\":" + String(upPos) +
+               ",\"size\":" + String(upLen) + ",\"md5\":\"" + upMd5 + "\",\"unit_md5\":\"" + upUnitMd5 + "\"}";
+    web.send(200, "application/json", j);
+  });
+  web.on("/upload", HTTP_POST, [] {
+    String to = web.arg("to");
+    String err;
+    if (upState) err = "busy";
+    else if (!upPathOk(to)) err = "bad target path (absolute, letters, digits, / . _ - only)";
+    else if (!upBuf || !upLen) err = "no file";
+    else if (upFull) err = "file too big (max " + String(UP_MAX) + " bytes)";
+    else if (!txEnabled) err = "TX is off";
+    if (err.length()) {
+      if (!upState && upBuf) { free(upBuf); upBuf = nullptr; }
+      web.send(400, "text/plain", err + "\n");
+      return;
+    }
+    MD5Builder md;
+    md.begin();
+    md.add(upBuf, upLen);
+    md.calculate();
+    upMd5 = md.toString();
+    upTo = to;
+    upUnitMd5 = "";
+    upPos = 0;
+    upHead = false;
+    upT = millis();
+    upState = 1;
+    upResult = "sending";
+    web.send(200, "text/plain", "sending " + String(upLen) + " bytes to " + upTo + ", md5 " + upMd5 + "\n");
+  }, [] {
+    if (upState) return;
+    HTTPUpload &u = web.upload();
+    if (u.status == UPLOAD_FILE_START) {
+      if (!upBuf) upBuf = (uint8_t *)malloc(UP_MAX);
+      upLen = 0;
+      upFull = false;
+    } else if (u.status == UPLOAD_FILE_WRITE && upBuf) {
+      if (upLen + u.currentSize > UP_MAX) upFull = true;
+      else { memcpy(upBuf + upLen, u.buf, u.currentSize); upLen += u.currentSize; }
+    }
+  });
   web.on("/send", HTTP_POST, [] {
+    if (upState) { web.send(409, "text/plain", "busy: upload running"); return; }
+    mqManual = millis();
     vscLine(web.arg("line"));
     web.send(200, "text/plain", "ok");
   });
@@ -635,6 +847,7 @@ void loop() {
     if (client && client.connected()) client.write(buf, n);
     mqConsole(buf, n);
   }
+  upStep();
   mqLoop();
 
   while (client && client.connected() && client.available()) {

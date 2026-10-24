@@ -49,7 +49,7 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 | `docs/protocol.md` | I²C framing, RX status bytes, TX settings frame, menus and ranges, bus wiring, RS485 cross-reference |
 | `docs/images/` | Annotated VSC board photos and the wall box colour label |
 | `esp/vsc-serial-bridge/` | ESP32 WiFi bridge to the VSC's Linux console (browser + telnet) |
-| `logger/i2clog.c` | `LD_PRELOAD` library: logs every I²C exchange to `/i2clog.txt` and adds the debug pages |
+| `logger/i2clog.c` | `LD_PRELOAD` library: the debug pages, the theme, HASSOS mode and shell control, and (when debug logging is on) a log of every I²C exchange in `/i2clog.txt` |
 | `logger/build.sh` | Builds `i2clog.so` with `zig cc` (ARM926EJ-S, freestanding) |
 | `theme/README.md` | How the screen theme and HASSOS mode work, and how to make and install your own screens |
 | `theme/darken.py` | Makes a dark set from your card's own screen images |
@@ -70,7 +70,7 @@ No firmware, card images, disassembly or Nuaire artwork are published here. The 
    - Page 1 shows the decoded status, the flags and the last TX frame.
    - Tap the logo again for page 2: the full 28-byte replies for each request type (`01`, `0c`, `0d`).
    - Press Home to exit.
-4. Every exchange is appended to `/i2clog.txt` on the card's 2nd partition. Image the card and run `python tools/getlog.py card.img out.txt`.
+4. Debug logging is off by default, so the card isn't written all the time. To turn it on, run `touch /tmp/debug` from a shell (or use the **Debug logging** switch in Home Assistant, see [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt)). `rm /tmp/debug` turns it off, and a restart turns it off too. While it's on, every exchange is appended to `/i2clog.txt` on the card's 2nd partition and also printed on the console as `@L <line>`. Start, exit and crash notes are always written. Image the card and run `python tools/getlog.py card.img out.txt`, or read the lines live from the console or Home Assistant.
 
 To build your own image:
 

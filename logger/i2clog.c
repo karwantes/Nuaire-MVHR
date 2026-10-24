@@ -50,7 +50,7 @@ static void flush(int force_sync)
     last_flush = now_sec;
 }
 
-static void emit(const char *s, int n)
+static void to_file(const char *s, int n)
 {
     if (logfd == -2) /* O_WRONLY|O_CREAT|O_APPEND */
         logfd = (int)sc4(5, (long)"/i2clog.txt", 0x1 | 0x40 | 0x400, 0644, 0);
@@ -61,6 +61,30 @@ static void emit(const char *s, int n)
     logged += n;
     if (logged < 65536) flush(1); /* start-up: nothing lost if es-lcd exits or the unit resets */
     else if (now_sec - last_flush >= 1 || lused > 12000) flush(0);
+}
+
+/* Debug logging is off unless /tmp/debug exists (checked once a second, so it is off again after a
+   restart). When on, each line goes to /i2clog.txt and to the console as "@L <line>", where the
+   bridge publishes it to MQTT. Start, exit and crash notes always go to the file. */
+static int dlog, confd = -2;
+static u32 dlog_t = 0xffffffff;
+static char cbuf[600];
+
+static void emit(const char *s, int n)
+{
+    if (now_sec != dlog_t) {
+        int on = sc4(33, (long)"/tmp/debug", 0, 0, 0) == 0;
+        if (dlog && !on && logfd >= 0) flush(1);
+        dlog = on; dlog_t = now_sec;
+    }
+    if (!dlog) return;
+    to_file(s, n);
+    if (confd == -2) /* O_WRONLY|O_NOCTTY|O_NONBLOCK: a full console drops the line, never stalls es-lcd */
+        confd = (int)sc4(5, (long)"/dev/console", 0x1 | 0x100 | 0x800, 0, 0);
+    if (confd < 0 || n > (int)sizeof(cbuf) - 3) return;
+    cbuf[0] = '@'; cbuf[1] = 'L'; cbuf[2] = ' ';
+    for (int i = 0; i < n; i++) cbuf[3 + i] = s[i];
+    sc4(4, confd, (long)cbuf, n + 3, 0);
 }
 
 static char *putstr(char *p, const char *s) { while (*s) *p++ = *s++; return p; }
@@ -403,7 +427,7 @@ static void theme_init(void)
 static void note(const char *s)
 {
     char line[96], *p = line;
-    stamp(&p); p = putstr(p, s); *p++ = '\n'; emit(line, p - line);
+    stamp(&p); p = putstr(p, s); *p++ = '\n'; to_file(line, p - line);
 }
 static char *put32(char *p, u32 v) { for (int s = 24; s >= 0; s -= 8) p = hx(p, v >> s); return p; }
 static void on_crash(int sig, void *info, void *uc)
@@ -415,7 +439,7 @@ static void on_crash(int sig, void *info, void *uc)
     p = putstr(p, " pc="); p = put32(p, sc[18]); p = putstr(p, " lr="); p = put32(p, sc[17]);
     p = putstr(p, " sp="); p = put32(p, sc[16]); p = putstr(p, " addr="); p = put32(p, sc[20]);
     p = putstr(p, " r0="); p = put32(p, sc[3]); p = putstr(p, " r1="); p = put32(p, sc[4]);
-    *p++ = '\n'; emit(line, p - line); flush(1);
+    *p++ = '\n'; to_file(line, p - line); flush(1);
     sc4(37, sc4(20, 0, 0, 0, 0), sig, 0, 0); /* handler was reset: dies with the same signal */
 }
 __attribute__((constructor)) static void init(void)
@@ -552,6 +576,60 @@ static void shell_bypass(void)
     if (c >= 15 && c <= 30) S0_D1 = (S0_D1 & 3) | c << 2;
 }
 
+/* Shell airflow: /tmp/airflow holding "S1 S2 S3 E1 E2 E3" (supply and extract speed 1/2/3, in %)
+   sets the commissioning airflow and is then deleted. 0x708ac holds % << 1 (bit 0 kept) in the
+   order S3 E3 S1 S2 E1 E2 and goes out as d5-d10; the Air Flow screens read the % from 0x1e2aa-af.
+   A set is ignored unless every value is 1-100. Like the setpoint
+   it is not saved to the card, so a restart goes back to the stored values. */
+#define AIR U8(0x708ac)
+static const unsigned char AIR_IDX[6] = {2, 3, 0, 4, 5, 1};
+static const u32 AIR_UI[6] = {0x1e2af, 0x1e2ae, 0x1e2ad, 0x1e2ac, 0x1e2ab, 0x1e2aa};
+
+static void shell_airflow(void)
+{
+    char t[32];
+    int v[6], k = 0, cur = -1;
+    long fd = sc4(5, (long)"/tmp/airflow", 0, 0, 0);
+    if (fd < 0) return;
+    long n = sc4(3, fd, (long)t, sizeof(t) - 1, 0);
+    sc4(6, fd, 0, 0, 0);
+    sc4(10, (long)"/tmp/airflow", 0, 0, 0);
+    for (long i = 0; i < n && k < 6; i++) {
+        if (t[i] >= '0' && t[i] <= '9') cur = (cur < 0 ? 0 : cur * 10) + t[i] - '0';
+        else if (cur >= 0) { v[k++] = cur; cur = -1; }
+        if (cur > 999) return;
+    }
+    if (cur >= 0 && k < 6) v[k++] = cur;
+    if (k != 6) return;
+    for (int i = 0; i < 6; i++) if (v[i] < 1 || v[i] > 100) return;
+    for (int i = 0; i < 6; i++) {
+        volatile unsigned char *b = &AIR + AIR_IDX[i];
+        *b = (*b & 1) | v[i] << 1;
+        U8(AIR_UI[i]) = v[i];
+    }
+}
+
+/* Airflow for the shell: /tmp/airflow_state "S1 S2 S3 E1 E2 E3" in %, written when 0x708ac changes. */
+static unsigned char air_last[6], air_seen;
+
+static void airflow_state(void)
+{
+    volatile unsigned char *a = &AIR;
+    int same = air_seen;
+    for (int i = 0; i < 6; i++) if (air_last[i] != a[i]) same = 0;
+    if (same) return;
+    for (int i = 0; i < 6; i++) air_last[i] = a[i];
+    air_seen = 1;
+    char line[40], *p = line;
+    for (int i = 0; i < 6; i++) { if (i) *p++ = ' '; p = putdec(p, a[AIR_IDX[i]] >> 1); }
+    *p++ = '\n';
+    long fd = sc4(5, (long)"/tmp/airflow_state", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); }
+    char l2[64], *q = l2;
+    stamp(&q); q = putstr(q, "AIR "); for (char *s = line; s < p; s++) *q++ = *s;
+    emit(l2, q - l2);
+}
+
 /* Bypass status for the shell: p9 0x08 set = the unit has the bypass ON. Written to /tmp/bypass_state
    ("1" or "0") only when it changes, from replies with a good checksum and working comms. It is the
    unit's own decision; the damper itself (wax actuator) follows over about a minute. */
@@ -637,6 +715,8 @@ long write(int fd, const void *buf, unsigned long n)
         hassos_hold(1);
         shell_speed();
         shell_bypass();
+        shell_airflow();
+        airflow_state();
         hassos_hold(0);
         log_bst();
         if (n == 3) shell_time();
