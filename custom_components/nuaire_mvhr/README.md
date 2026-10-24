@@ -1,0 +1,83 @@
+# Nuaire MVHR (VSC serial): Home Assistant custom integration
+
+**Experimental, requires further testing.** It has only been run against a simulated
+console, not on a real VSC yet.
+
+This runs the ESP bridge's console logic inside Home Assistant, for a USB serial dongle
+wired straight to the VSC's **LINUX TERMINAL** header, with no ESP:
+
+- it logs in as root when the console shows `login:`;
+- every 20 s it types the same poll line as the bridge and parses the `@S` answer;
+- it types the same shell lines when you change something in HA.
+
+So you get the same entities as the bridge's MQTT discovery.
+
+The VSC card must be converted first ([docs/convert-card.md](../../docs/convert-card.md)).
+Home Assistant doesn't convert anything.
+
+## Connection modes
+
+| Mode | How | Status |
+|---|---|---|
+| 1. ESP bridge on the VSC console | MQTT discovery from [the bridge](../../esp/vsc-serial-bridge/README.md). It doesn't need this integration. | Working |
+| 2. USB serial dongle on the VSC console | This integration | Experimental, requires further testing |
+| 3. TTL/RS485 adapter on the bus | Read only, planned once the bus is mapped | Not started |
+
+Use mode 1 or mode 2, not both: two masters on one console would type over each other.
+
+## Wiring
+
+The header is RS232 level (115200 8N1), so a **USB-to-RS232** dongle connects to it
+directly: dongle TX to VSC RX, dongle RX to VSC TX, GND to 0V. A plain USB-TTL (3.3 V)
+adapter needs a MAX3232 module in between, as on the ESP.
+
+Pin positions are in [docs/convert-card.md](../../docs/convert-card.md).
+
+## Install
+
+1. Copy `custom_components/nuaire_mvhr` to `/config/custom_components/` on your HA. You
+   can also add this repo to HACS as a custom repository of type Integration.
+2. Restart Home Assistant.
+3. Go to **Settings > Devices & services > Add integration > Nuaire MVHR (VSC serial)**.
+   Pick the dongle, or type a path. A `/dev/serial/by-id/...` path survives a reboot.
+   An `rfc2217://` or `socket://` URL also works, for a serial server.
+
+## Entities
+
+These are the same as the MQTT bridge:
+
+- **Controls:**
+  - Fan speed 1/2/3
+  - Bypass Auto/On/Off and the bypass setpoint
+  - Night mode and holiday mode
+  - Humidity setpoint and frost protection level
+  - Supply and extract airflow for speed 1/2/3
+  - Screen timeout
+  - Reset filter hours
+  - Debug logging. The es-lcd log lines go to the HA log at debug level for `custom_components.nuaire_mvhr`.
+- **Sensors:**
+  - Humidity
+  - Extract and intake air temperature
+  - Running fan speed
+  - Run hours and filter hours
+  - Filter change due
+  - Bypass active
+  - Communication with unit
+- **Fault sensors:** supply fan, extract fan, heater, cooler, frost, and test routine required.
+
+Heater fault, Cooler fault and Test routine required still need testing, as on the bridge.
+Disable the heater and cooler entities if your unit has neither fitted.
+
+If the VSC doesn't answer 3 polls in a row, the entities go unavailable and
+**Communication with unit** shows off. That happens when the VSC is off or unplugged, or
+the console isn't at a root shell. Unlike the ESP bridge there is no debug log entity, no
+telnet and no file upload.
+
+## Tested
+
+- The parser and command lines, offline against real poll answers.
+- Loaded in Home Assistant against a simulated console over `socket://`:
+  - the config flow, login and all entities;
+  - commands;
+  - going unavailable when the console stops answering, and recovering.
+- On a real VSC with a USB dongle: **requires further testing**.

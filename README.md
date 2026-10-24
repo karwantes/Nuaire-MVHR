@@ -57,7 +57,8 @@ The rest of this page is the research behind it: how the VSC works, the logger i
 - [x] Custom screen theme (dark) and a **Controlled by HASSOS** tick box that hands control to Home Assistant, with the screen as a manual override (see [theme/README.md](theme/README.md)).
 - [x] Home Assistant through the ESP bridge (MQTT): speed, bypass, airflow %, humidity, both temperatures, running speed, comms and fault sensors, debug log. Heater fault, Cooler fault and Test routine required still need testing (see [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt)).
 - [x] Card converter: `vscconv.exe` converts a stock card in a PC card reader in place, with a checked backup and restore, so no card image needs building (see [docs/convert-card.md](docs/convert-card.md)).
-- [ ] Home Assistant custom integration with three connection modes: ESP bridge, USB serial dongle on the VSC console (experimental), and a TTL/RS485 tap on the bus (read only).
+- [x] Home Assistant custom integration for a USB serial dongle on the VSC console, with no ESP: same entities as the bridge. Experimental, **requires further testing** on a real VSC (see [custom_components/nuaire_mvhr](custom_components/nuaire_mvhr/README.md)). The ESP bridge stays on MQTT.
+- [ ] Integration mode 3: a TTL/RS485 tap on the bus (read only), once the bus is mapped.
 - [ ] Bridge authentication: a login for the web page, `/send` and OTA. Until then, keep the bridge on a trusted network.
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
@@ -89,6 +90,7 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 | `docs/protocol.md` | I²C framing, RX status bytes, TX settings frame, menus and ranges, bus wiring, RS485 cross-reference |
 | `docs/images/` | Annotated VSC board photos and the wall box colour label |
 | `esp/vsc-serial-bridge/` | ESP32 WiFi bridge to the VSC's Linux console (browser + telnet) |
+| `custom_components/nuaire_mvhr/` | Home Assistant integration for a USB serial dongle on the VSC console (experimental) |
 | `logger/i2clog.c` | `LD_PRELOAD` library: the debug pages, the theme, HASSOS mode and shell control, and (when debug logging is on) a log of every I²C exchange in `/i2clog.txt` |
 | `logger/build.sh` | Builds `i2clog.so` with `zig cc` (ARM926EJ-S, freestanding) |
 | `theme/README.md` | How the screen theme and HASSOS mode work, and how to make and install your own screens |

@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VSC console serial port",
+        "description": "The USB serial dongle wired to the VSC console header (115200 baud). The VSC card must be converted first. Experimental: requires further testing.",
+        "data": {
+          "port": "Serial port"
+        }
+      }
+    },
+    "error": {
+      "cannot_open": "Cannot open the serial port."
+    },
+    "abort": {
+      "already_configured": "This serial port is already set up."
+    }
+  }
+}

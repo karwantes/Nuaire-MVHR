@@ -1,0 +1,12 @@
+{
+  "domain": "nuaire_mvhr",
+  "name": "Nuaire MVHR (VSC serial)",
+  "codeowners": ["@karwantes"],
+  "config_flow": true,
+  "documentation": "https://github.com/karwantes/Nuaire-MVHR/blob/main/custom_components/nuaire_mvhr/README.md",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/karwantes/Nuaire-MVHR/issues",
+  "requirements": ["pyserial-asyncio-fast>=0.16", "pyserial>=3.5"],
+  "version": "0.1.0"
+}
