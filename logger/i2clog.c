@@ -550,12 +550,12 @@ static void shell_time(void)
    both exist). byFsa turns a running 0x1e320 into d0 0x80 clear and 0x1e31c into d0 0x08 clear. Like
    the speed files it only acts when the files change, so the screen keys keep working. Outside
    HASSOS mode the timers still run out (12 h and 8 h). /tmp/bypasstemp holding "NN" (15-30 °C) sets
-   the setpoint (S0 bits 10-15, sent as d1) and is then deleted. It is not saved to the card, so a
-   restart goes back to the stored setpoint. */
+   the setpoint (S0 bits 10-15, sent as d1) and is then deleted. It is saved to setup3 (see
+   save_setup), so it lasts across a restart. */
 #define BYP_OVR U16(0x1e320)
 #define BYP_DIS U16(0x1e31c)
 #define S0_D1 U8(0x6ab71)
-static int shell_byp;
+static int shell_byp, setup_dirty;
 
 static void shell_bypass(void)
 {
@@ -574,14 +574,13 @@ static void shell_bypass(void)
     sc4(10, (long)"/tmp/bypasstemp", 0, 0, 0);
     if (n != 2 || t[0] < '0' || t[0] > '9' || t[1] < '0' || t[1] > '9') return;
     int c = (t[0] - '0') * 10 + t[1] - '0';
-    if (c >= 15 && c <= 30) S0_D1 = (S0_D1 & 3) | c << 2;
+    if (c >= 15 && c <= 30) { S0_D1 = (S0_D1 & 3) | c << 2; setup_dirty = 1; }
 }
 
 /* Shell airflow: /tmp/airflow holding "S1 S2 S3 E1 E2 E3" (supply and extract speed 1/2/3, in %)
    sets the commissioning airflow and is then deleted. 0x708ac holds % << 1 (bit 0 kept) in the
    order S3 E3 S1 S2 E1 E2 and goes out as d5-d10; the Air Flow screens read the % from 0x1e2aa-af.
-   A set is ignored unless every value is 1-100. Like the setpoint
-   it is not saved to the card, so a restart goes back to the stored values. */
+   A set is ignored unless every value is 1-100. Like the setpoint it is saved to setup3. */
 #define AIR U8(0x708ac)
 static const unsigned char AIR_IDX[6] = {2, 3, 0, 4, 5, 1};
 static const u32 AIR_UI[6] = {0x1e2af, 0x1e2ae, 0x1e2ad, 0x1e2ac, 0x1e2ab, 0x1e2aa};
@@ -608,6 +607,7 @@ static void shell_airflow(void)
         *b = (*b & 1) | v[i] << 1;
         U8(AIR_UI[i]) = v[i];
     }
+    setup_dirty = 1;
 }
 
 /* Airflow for the shell: /tmp/airflow_state "S1 S2 S3 E1 E2 E3" in %, written when 0x708ac changes. */
@@ -629,6 +629,192 @@ static void airflow_state(void)
     char l2[64], *q = l2;
     stamp(&q); q = putstr(q, "AIR "); for (char *s = line; s < p; s++) *q++ = *s;
     emit(l2, q - l2);
+}
+
+/* Screen timeout for the shell: /tmp/screen_timeout holding minutes (0 = never, 1-120) sets how
+   long the screen stays on after a touch, then deletes itself; /tmp/screen_state reports it. es-lcd
+   sets the sleep countdown 0x1e2da to 3 on every touch (the immediate of "movne r0, #3" at 0xe200),
+   counts it down once per clock minute while above 1, and shows the black sleep screen at 1; 0
+   never counts or sleeps. So N minutes is the immediate N + 1, patched in the code. The value is
+   saved in /etc/screen_timeout (kept across reboots, like /etc/hassos) and applied again at start;
+   without that file es-lcd's 3 stays (sleep 1-2 minutes after the last touch). */
+#define SLEEP_CNT U16(0x1e2da)
+#define SLEEP_IMM U8(0xe200)
+#define SCREEN_SAVED "/etc/screen_timeout"
+static int scr_last = -1;
+
+/* minutes from a small file, or -1; the file is deleted when del is set */
+static int screen_read(const char *path, int del)
+{
+    char t[8];
+    long fd = sc4(5, (long)path, 0, 0, 0);
+    if (fd < 0) return -1;
+    long n = sc4(3, fd, (long)t, sizeof(t) - 1, 0);
+    sc4(6, fd, 0, 0, 0);
+    if (del) sc4(10, (long)path, 0, 0, 0);
+    int v = 0, ok = n > 0;
+    for (long i = 0; i < n && ok; i++)
+        if (t[i] >= '0' && t[i] <= '9') v = v * 10 + t[i] - '0';
+        else if (t[i] != '\n' && t[i] != ' ') ok = 0;
+    return ok && v <= 120 ? v : -1;
+}
+
+static void shell_screen(void)
+{
+    int v = screen_read("/tmp/screen_timeout", 1), save = v >= 0;
+    if (v < 0 && scr_last < 0) v = screen_read(SCREEN_SAVED, 0); /* first call: the saved value */
+    if (v >= 0 && sc4(125, 0xe000, 0x1000, 7, 0) == 0) { /* mprotect rwx */
+        SLEEP_IMM = v ? v + 1 : 0;
+        sc4(0xf0002, 0xe200, 0xe204, 0, 0); /* cacheflush */
+        if (SLEEP_CNT > 1 || !v) SLEEP_CNT = SLEEP_IMM; /* awake: restart the countdown */
+        if (save) {
+            char s[8], *e = putdec(s, v);
+            *e++ = '\n';
+            long fd = sc4(5, (long)SCREEN_SAVED, 0x1 | 0x40 | 0x200, 0644, 0);
+            if (fd >= 0) { sc4(4, fd, (long)s, e - s, 0); sc4(6, fd, 0, 0, 0); sc4(36, 0, 0, 0, 0); }
+        }
+    }
+    int m = SLEEP_IMM ? SLEEP_IMM - 1 : 0;
+    if (m == scr_last) return;
+    scr_last = m;
+    char line[8], *p = putdec(line, m);
+    *p++ = '\n';
+    long fd = sc4(5, (long)"/tmp/screen_state", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); }
+    char l2[32], *q = l2;
+    stamp(&q); q = putstr(q, "SCREEN "); for (char *s = line; s < p; s++) *q++ = *s;
+    emit(l2, q - l2);
+}
+
+/* Run time for the shell: /tmp/runtime "RUN FILTER", es-lcd's total run hours (0x1e318) and hours
+   since the last filter change (0x1e30c), written when they change. es-lcd shows the filter-change
+   icon above 8759 hours (one year) and saves both to runtime.txt. */
+static u32 rt_last[2] = {0xffffffff, 0xffffffff};
+
+static void runtime_state(void)
+{
+    /* touch /tmp/filter_reset: what the Maintenance filter-reset key (0x72) does, zero the filter
+       hours and call es-lcd's SaveRunTime (0xb740, no arguments) so it lasts across a restart. */
+    if (sc4(10, (long)"/tmp/filter_reset", 0, 0, 0) == 0) {
+        *(volatile u32 *)0x1e30c = 0;
+        ((void (*)(void))0xb740)();
+    }
+    u32 r = *(volatile u32 *)0x1e318, f = *(volatile u32 *)0x1e30c;
+    if (r == rt_last[0] && f == rt_last[1]) return;
+    rt_last[0] = r; rt_last[1] = f;
+    char line[24], *p = putdec(line, r);
+    *p++ = ' '; p = putdec(p, f); *p++ = '\n';
+    long fd = sc4(5, (long)"/tmp/runtime", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); }
+}
+
+/* Setpoints and modes for the shell, each file read once and deleted:
+   /tmp/humidity_sp "NN": rising-humidity setpoint 50-85 %, S0 bits 17-23 (d2 >> 1).
+   /tmp/frost_sp "N": frost level 0 to -5 °C written as 0-5; 0x708c4 (s16, negative) and S0 bits 28-31.
+   /tmp/night "1"/"0": night mode on/off, what the Night screen key does: timer 0x1e324 = the
+   screen's hours (0x1e2dd) x 60, or 0. /tmp/holiday "1"/"0": the same with 0x1e322 = days (0x1e2df) x 1440.
+   /tmp/modes reports "HUM FROST NIGHT HOLIDAY" (frost as 0-5, night/holiday minutes left), written
+   when it changes. Frost is read from S0, the value the unit gets (d3): at start-up 0x708c4 can
+   hold -5 while S0 and d3 say 0, as es-lcd's setup3 loader sets 0x708c4 but not the S0 bits.
+   Saving: after a shell change to the humidity, frost, bypass setpoint or airflow, save_setup calls
+   es-lcd's setup3 save (0xb894, no arguments; what the screen's settings use), which es-lcd reads
+   back at start. Night and holiday are not in setup3, so /etc/modes holds "FROST NIGHT HOLIDAY"
+   (frost 0-5, night/holiday 1 = on), written whenever one changes (by the screen too), and is
+   applied on the first call after a restart; night/holiday then start again for the screen's
+   hours/days, and in HASSOS mode stay on until turned off. */
+#define S0W (*(volatile u32 *)0x6ab70)
+#define FROST_LVL (*(volatile short *)0x708c4)
+#define NIGHT_T U16(0x1e324)
+#define HOL_T U16(0x1e322)
+
+static int shell_num(const char *path)
+{
+    char t[8];
+    long fd = sc4(5, (long)path, 0, 0, 0);
+    if (fd < 0) return -1;
+    long n = sc4(3, fd, (long)t, sizeof(t) - 1, 0);
+    sc4(6, fd, 0, 0, 0);
+    sc4(10, (long)path, 0, 0, 0);
+    int v = 0, ok = n > 0;
+    for (long i = 0; i < n && ok; i++)
+        if (t[i] >= '0' && t[i] <= '9') v = v * 10 + t[i] - '0';
+        else if (t[i] != '\n' && t[i] != ' ') ok = 0;
+    return ok ? v : -1;
+}
+
+#define MODES_SAVED "/etc/modes"
+static u32 modes_last[4] = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff};
+static int saved_last[3] = {-1, -1, -1};
+
+static void set_frost(int v) { FROST_LVL = -v; S0W = (S0W & 0x0fffffffu) | (u32)v << 28; }
+
+/* first call: apply /etc/modes */
+static void modes_load(void)
+{
+    char t[16];
+    int v[3], k = 0, cur = -1;
+    long fd = sc4(5, (long)MODES_SAVED, 0, 0, 0);
+    if (fd < 0) return;
+    long n = sc4(3, fd, (long)t, sizeof(t) - 1, 0);
+    sc4(6, fd, 0, 0, 0);
+    for (long i = 0; i < n && k < 3; i++) {
+        if (t[i] >= '0' && t[i] <= '9') cur = (cur < 0 ? 0 : cur * 10) + t[i] - '0';
+        else if (cur >= 0) { v[k++] = cur; cur = -1; }
+    }
+    if (cur >= 0 && k < 3) v[k++] = cur;
+    if (k != 3 || v[0] > 5 || v[1] > 1 || v[2] > 1) return;
+    set_frost(v[0]);
+    if (v[1]) NIGHT_T = U8(0x1e2dd) * 60;
+    if (v[2]) HOL_T = U8(0x1e2df) * 1440;
+    for (int i = 0; i < 3; i++) saved_last[i] = v[i];
+}
+
+static void modes_save(void)
+{
+    int s[3] = {S0W >> 28, NIGHT_T != 0, HOL_T != 0}, same = 1;
+    for (int i = 0; i < 3; i++) if (s[i] != saved_last[i]) same = 0;
+    if (same) return;
+    char line[16], *p = line;
+    for (int i = 0; i < 3; i++) { saved_last[i] = s[i]; if (i) *p++ = ' '; p = putdec(p, s[i]); }
+    *p++ = '\n';
+    long fd = sc4(5, (long)MODES_SAVED, 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); sc4(36, 0, 0, 0, 0); }
+}
+
+/* es-lcd's setup3 save writes 0x708c4 as the frost level, so it is first set from S0. */
+static void save_setup(void)
+{
+    if (!setup_dirty) return;
+    setup_dirty = 0;
+    FROST_LVL = -(short)(S0W >> 28);
+    ((void (*)(void))0xb894)();
+    sc4(36, 0, 0, 0, 0); /* sync */
+    char line[32], *p = line;
+    stamp(&p); p = putstr(p, "SAVED setup3\n"); emit(line, p - line);
+}
+
+static void shell_modes(void)
+{
+    if (saved_last[0] < 0) modes_load();
+    int v = shell_num("/tmp/humidity_sp");
+    if (v >= 50 && v <= 85) { S0W = (S0W & ~0xfe0000u) | (u32)v << 17; setup_dirty = 1; }
+    v = shell_num("/tmp/frost_sp");
+    if (v >= 0 && v <= 5) { set_frost(v); setup_dirty = 1; }
+    v = shell_num("/tmp/night");
+    if (v == 0 || v == 1) NIGHT_T = v ? U8(0x1e2dd) * 60 : 0;
+    v = shell_num("/tmp/holiday");
+    if (v == 0 || v == 1) HOL_T = v ? U8(0x1e2df) * 1440 : 0;
+    save_setup();
+    modes_save();
+    u32 m[4] = {S0W >> 17 & 0x7f, S0W >> 28, NIGHT_T, HOL_T};
+    int same = 1;
+    for (int i = 0; i < 4; i++) if (m[i] != modes_last[i]) same = 0;
+    if (same) return;
+    char line[32], *p = line;
+    for (int i = 0; i < 4; i++) { modes_last[i] = m[i]; if (i) *p++ = ' '; p = putdec(p, m[i]); }
+    *p++ = '\n';
+    long fd = sc4(5, (long)"/tmp/modes", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); }
 }
 
 /* Bypass status for the shell: p9 0x08 set = the unit has the bypass ON. Written to /tmp/bypass_state
@@ -762,6 +948,9 @@ long write(int fd, const void *buf, unsigned long n)
         shell_bypass();
         shell_airflow();
         airflow_state();
+        shell_screen();
+        runtime_state();
+        shell_modes();
         hassos_hold(0);
         log_bst();
         if (n == 3) shell_time();

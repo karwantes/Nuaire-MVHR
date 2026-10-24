@@ -148,12 +148,23 @@ For now, HA uses small files on the unit (through the ESP serial bridge in `esp/
 | `touch /tmp/bypass_on` | Bypass ON: damper open, air skips the heat exchanger (wins over `bypass_off`) |
 | `touch /tmp/bypass_off` | Bypass OFF: damper closed, heat recovery |
 | `rm /tmp/bypass_on /tmp/bypass_off` | Auto: the unit decides from the setpoint |
-| `echo 24 > /tmp/bypasstemp` | Sets the bypass setpoint (15–30 °C), then deletes itself. Not saved, so a restart goes back to the stored value |
+| `echo 24 > /tmp/bypasstemp` | Sets the bypass setpoint (15–30 °C), then deletes itself. Saved to es-lcd's `setup3`, so it lasts across a restart |
 | `cat /tmp/bypass_state` | `1` = the unit has bypass ON, `0` = heat recovery. Updated when it changes |
-| `echo 20 35 100 20 35 100 > /tmp/airflow` | Sets the airflow % for supply speed 1/2/3, then extract speed 1/2/3, then deletes itself. Ignored unless each value is 1–100. Not saved, so a restart goes back to the commissioned values |
+| `echo 20 35 100 20 35 100 > /tmp/airflow` | Sets the airflow % for supply speed 1/2/3, then extract speed 1/2/3, then deletes itself. Ignored unless each value is 1–100. Saved to `setup3` |
 | `cat /tmp/airflow_state` | The airflow % in use, same order. Updated when it changes |
+| `echo 66 > /tmp/humidity_sp` | Humidity setpoint (50–85 %), then deletes itself. Saved to `setup3` |
+| `echo 2 > /tmp/frost_sp` | Frost protection level, 0–5 meaning 0 to −5 °C, then deletes itself. Saved to `setup3` and `/etc/modes` |
+| `echo 1 > /tmp/night` / `echo 0 > /tmp/night` | Night mode on/off (the screen's hours), then deletes itself. Saved to `/etc/modes` |
+| `echo 1 > /tmp/holiday` / `echo 0 > /tmp/holiday` | Holiday mode on/off (the screen's days), then deletes itself. Saved to `/etc/modes` |
+| `cat /tmp/modes` | `HUM FROST NIGHT HOLIDAY`: humidity setpoint, frost 0–5, night and holiday minutes left. Updated when it changes |
+| `echo 0 > /tmp/screen_timeout` | Screen sleep after N minutes (0–120, 0 = never), then deletes itself. Saved to `/etc/screen_timeout` |
+| `cat /tmp/screen_state` | The screen timeout in use (minutes) |
+| `cat /tmp/runtime` | `RUN FILTER`: total run hours and hours since the last filter change |
+| `touch /tmp/filter_reset` | Resets the filter hours like the Maintenance screen and saves it (**requires further testing**) |
 | `cat /tmp/sensors` | `EXT IN RH SPD P8 P9`: extract-air and intake-air temperature (°C), humidity (%), running fan speed (1/2/3), and the raw fault bytes p8 and p9 in decimal (a clear bit is a fault; both 255 = no communication). `-` when a sensor reports a fault. Updated when it changes |
 | `touch /tmp/debug` | Debug logging on: log lines go to `/i2clog.txt` and to the console as `@L <line>` (the bridge sends them to MQTT). `rm /tmp/debug` turns it off. Off after a restart |
+
+Saved values: `setup3` (in `/opt/dvsdk/dm355`, the file name ends in a space) is es-lcd's own settings file, written by es-lcd's own save routine; `/etc/modes` holds `FROST NIGHT HOLIDAY` (night/holiday 1 = on, also written when the screen changes them) and is applied again at start. In HASSOS mode the night and holiday timers are held, so they stay on until turned off.
 
 These work with the tick box off too. Without HASSOS mode, es-lcd's timers end speed 2/3 as normal, and bypass on/off after 12 h / 8 h.
 

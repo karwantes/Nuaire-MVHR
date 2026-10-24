@@ -184,16 +184,17 @@ static int mqBypassTemp = 0;    // last setpoint sent; the unit can't report it
 static const char *const AIR_KEY[6] = {"air_s1", "air_s2", "air_s3", "air_e1", "air_e2", "air_e3"};
 static int mqAir[6];
 static bool mqAirKnown = false;
-// Fault bits from /tmp/sensors P8/P9 (active low: a clear bit is a fault). Heater fault and
-// "Test routine required" still need testing: the heater bit reads as a fault on a unit that may
-// have no heater, and p9 0x04 is also what es-lcd draws as fan bar 3.
+// Fault bits from /tmp/sensors P8/P9 (active low: a clear bit is a fault). Heater fault, Cooler
+// fault and "Test routine required" still need testing: the heater and cooler bits were only seen
+// on a unit with neither fitted (names from es-lcd's fault text), and p9 0x04 is also what es-lcd
+// draws as fan bar 3. Disable the heater/cooler entities in HA if the unit has none.
 static const char *const FAULT_KEY[6] = {"fault_supply_fan", "fault_extract_fan", "fault_heater", "fault_cooler", "fault_frost", "test_required"};
 static const char *const FAULT_NAME[6] = {"Supply fan fault", "Extract fan fault", "Heater fault", "Cooler fault", "Frost fault", "Test routine required"};
 static const uint8_t FAULT_BYTE[6] = {8, 8, 8, 8, 9, 9}, FAULT_BIT[6] = {0x08, 0x20, 0x40, 0x80, 0x20, 0x04};
 
 // One console line that reports the state. "@""S" so the echoed command line
 // doesn't look like the answer.
-#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"T\" $(cat /tmp/sensors 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
+#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"T\" $(cat /tmp/sensors 2>/dev/null) \"@\"\"R\" $(cat /tmp/runtime 2>/dev/null) \"@\"\"C\" $(cat /tmp/screen_state 2>/dev/null) \"@\"\"M\" $(cat /tmp/modes 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
 
 static void mqPub(const char *topic, const char *payload, bool retain = true) {
   if (mq && mqConnected) esp_mqtt_client_publish(mq, topic, payload, 0, 0, retain);
@@ -370,6 +371,29 @@ static void mqAnnounceAll() {
              AIR_KEY[i], AIR_KEY[i], i < 3 ? "fan-chevron-down" : "fan-chevron-up");
     mqDiscovery("number", AIR_KEY[i], name, extra);
   }
+  mqDiscovery("number", "screen_timeout", "Screen timeout",
+              "\"stat_t\":\"" MQ_BASE "/screen_timeout\",\"cmd_t\":\"" MQ_BASE "/screen_timeout/set\",\"min\":0,\"max\":120,\"step\":1,"
+              "\"unit_of_meas\":\"min\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:monitor-off\"");
+  mqDiscovery("sensor", "run_hours", "Run hours",
+              "\"stat_t\":\"" MQ_BASE "/run_hours\",\"dev_cla\":\"duration\",\"stat_cla\":\"total_increasing\",\"unit_of_meas\":\"h\","
+              "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:timer-outline\"");
+  mqDiscovery("sensor", "filter_hours", "Filter hours",
+              "\"stat_t\":\"" MQ_BASE "/filter_hours\",\"dev_cla\":\"duration\",\"stat_cla\":\"total_increasing\",\"unit_of_meas\":\"h\","
+              "\"ic\":\"mdi:air-filter\"");
+  mqDiscovery("binary_sensor", "filter_change", "Filter change due",
+              "\"stat_t\":\"" MQ_BASE "/filter_change\",\"dev_cla\":\"problem\",\"ic\":\"mdi:air-filter\"");
+  mqDiscovery("button", "filter_reset", "Reset filter hours",
+              "\"cmd_t\":\"" MQ_BASE "/filter_reset/set\",\"ent_cat\":\"config\",\"ic\":\"mdi:restore\"");
+  mqDiscovery("number", "humidity_sp", "Humidity setpoint",
+              "\"stat_t\":\"" MQ_BASE "/humidity_sp\",\"cmd_t\":\"" MQ_BASE "/humidity_sp/set\",\"min\":50,\"max\":85,\"step\":1,"
+              "\"unit_of_meas\":\"%\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:water-percent\"");
+  mqDiscovery("number", "frost_sp", "Frost protection level",
+              "\"stat_t\":\"" MQ_BASE "/frost_sp\",\"cmd_t\":\"" MQ_BASE "/frost_sp/set\",\"min\":-5,\"max\":0,\"step\":1,"
+              "\"unit_of_meas\":\"°C\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:snowflake-thermometer\"");
+  mqDiscovery("switch", "night", "Night mode",
+              "\"stat_t\":\"" MQ_BASE "/night\",\"cmd_t\":\"" MQ_BASE "/night/set\",\"ic\":\"mdi:weather-night\"");
+  mqDiscovery("switch", "holiday", "Holiday mode",
+              "\"stat_t\":\"" MQ_BASE "/holiday\",\"cmd_t\":\"" MQ_BASE "/holiday/set\",\"ic\":\"mdi:bag-suitcase\"");
   mqPub(MQ_BASE "/status", "online");
   if (mqBypassTemp) mqPub(MQ_BASE "/bypass_temp", String(mqBypassTemp).c_str());
   mqLastPoll = 0;   // poll now
@@ -401,6 +425,20 @@ static void mqHandle(const char *topic, const char *data) {
   } else if (t == MQ_BASE "/debug/set") {
     if (d == "ON") cmd = "touch /tmp/debug";
     else if (d == "OFF") cmd = "rm -f /tmp/debug";
+  } else if (t == MQ_BASE "/screen_timeout/set") {
+    int v = (int)d.toFloat();
+    if (v >= 0 && v <= 120) cmd = "echo " + String(v) + " > /tmp/screen_timeout; sleep 2";
+  } else if (t == MQ_BASE "/humidity_sp/set") {
+    int v = (int)d.toFloat();
+    if (v >= 50 && v <= 85) cmd = "echo " + String(v) + " > /tmp/humidity_sp; sleep 2";
+  } else if (t == MQ_BASE "/frost_sp/set") {
+    int v = (int)d.toFloat();
+    if (v >= -5 && v <= 0) cmd = "echo " + String(-v) + " > /tmp/frost_sp; sleep 2";
+  } else if (t == MQ_BASE "/night/set" || t == MQ_BASE "/holiday/set") {
+    const char *f = t == MQ_BASE "/night/set" ? "/tmp/night" : "/tmp/holiday";
+    if (d == "ON" || d == "OFF") cmd = String("echo ") + (d == "ON" ? "1" : "0") + " > " + f + "; sleep 2";
+  } else if (t == MQ_BASE "/filter_reset/set") {
+    cmd = "touch /tmp/filter_reset; sleep 2";
   } else if (t.startsWith(MQ_BASE "/air_") && t.endsWith("/set") && mqAirKnown) {
     // The unit takes all six at once; the poll then puts HA back to what the unit has.
     int v = (int)d.toFloat();
@@ -461,6 +499,26 @@ static void mqParse(const char *line) {
   mqPub(MQ_BASE "/debug", strstr(p, "/tmp/debug") ? "ON" : "OFF");
   if (*p == '0' || *p == '1') mqPub(MQ_BASE "/bypass_state", *p == '1' ? "ON" : "OFF");
   mqSensors(strstr(p, "@T"));
+  // "@R RUN FILTER" (/tmp/runtime): es-lcd shows the filter icon above 8759 hours (one year)
+  unsigned long run, filt;
+  const char *r = strstr(p, "@R");
+  if (r && sscanf(r + 2, "%lu %lu", &run, &filt) == 2) {
+    mqPub(MQ_BASE "/run_hours", String(run).c_str());
+    mqPub(MQ_BASE "/filter_hours", String(filt).c_str());
+    mqPub(MQ_BASE "/filter_change", filt > 8759 ? "ON" : "OFF");
+  }
+  int scr;
+  const char *c = strstr(p, "@C");
+  if (c && sscanf(c + 2, "%d", &scr) == 1) mqPub(MQ_BASE "/screen_timeout", String(scr).c_str());
+  // "@M HUM FROST NIGHT HOLIDAY" (/tmp/modes): frost as 0-5 (= 0 to -5 °C), night/holiday minutes left
+  int hum, frost, night, hol;
+  const char *m = strstr(p, "@M");
+  if (m && sscanf(m + 2, "%d %d %d %d", &hum, &frost, &night, &hol) == 4) {
+    mqPub(MQ_BASE "/humidity_sp", String(hum).c_str());
+    mqPub(MQ_BASE "/frost_sp", String(-frost).c_str());
+    mqPub(MQ_BASE "/night", night ? "ON" : "OFF");
+    mqPub(MQ_BASE "/holiday", hol ? "ON" : "OFF");
+  }
   const char *a = strstr(p, "@A");
   if (!a) return;
   int v[6];

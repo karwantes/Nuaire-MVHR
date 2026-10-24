@@ -34,6 +34,10 @@ Decoded from the `es-lcd` disassembly. `S0` means the 32-bit settings word at 0x
 | 16 Holiday mode | Duration | 1–21 days | | 0x1e2df; timer 0x1e322 = days × 1440 min | d0 & 0x20 (active low) |
 | 18 Bypass override | Duration | 1–12 h | | 0x1e2a9; timer 0x1e320 = h × 60 min | d0 & 0x80 |
 
+**Saving.** es-lcd keeps these settings in `/opt/dvsdk/dm355/setup3 ` (the name ends in a space). The save routine is at 0xb894 (no arguments) and the loader at 0xc390–0xc5b0. The loader restores airflow, 0x708c4 frost, S0 bits 10–15 (bypass), S0 bits 17–23 (humidity) and Rising Boost, but **not** S0 bits 28–31, so after a restart the frost level on the wire is 0 whatever the screen shows. `i2clog.so` saves through 0xb894 too, and keeps frost, night and holiday in `/etc/modes`, which it applies again at start. Run hours and filter hours are saved by SaveRunTime at 0xb740.
+
+**Screen sleep.** The countdown is U16 0x1e2da; the immediate sleep is at 0xe200. A setting of N minutes counts N+1; 0 means never sleep.
+
 When the bypass override starts, it clears d0 bit 7 (override on) and bit 0, and it sets bits 4–6, which cancels Holiday, Night and Rising Boost. Stopping the override sets bit 7 again.
 
 **Summer bypass setpoint** (for example "bypass 24C"): above this inside temperature the unit opens the summer bypass so fresh air skips the heat exchanger (free cooling), as long as it is cooler outside. It is the setpoint, not the live damper state.
@@ -217,4 +221,5 @@ His capture has no temperatures in the broadcast, the checksum is unknown, and r
 - p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far. Run 3: pressing speed 3 (boost) on Home sent req 0c and then 0d, which stayed for about 26 minutes (from 158 s to the end), with p11 at e8 throughout; p15 follows as the checksum (ab → 8b → 8d → 9d). p9 stayed f6 (the speed-1 pattern) the whole time, so the p9 speed bits don't reflect boost; the v5 debug page also shows "Spd 1" during boost. Use p7 bit 0x20 / p11 to detect boost.
 - Reply header bytes: zero in runs 1–2, but an echo of TX d1..d8 from run 3 on, identical for every req (see above).
 - p19 meaning (no reader in es-lcd). The RS485 bus capture posted on the HA forum shows a `3B C2 54 06` message whose byte 2 is also 0x54, so p19 likely mirrors that field.
+- p13, p14: always `fe fe` (0) on this unit and unused by es-lcd. Possibly for the CO2 sensor (see above); needs a unit with one fitted, or a change to watch for.
 - p8 = 0xaa has bit 0x40 clear ("Heater fail"): check what the Settings status line shows on the real unit (possibly no heater fitted). The v5 debug page decodes it as "Flt: Htr", with both fan bits OK.

@@ -68,15 +68,20 @@ The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `l
 2. A device **MRXBOX** appears with:
    - **Fan speed** (select 1/2/3)
    - **Bypass** (select Auto/On/Off)
-   - **Bypass setpoint** (15–30 °C). The unit can't report it, so HA shows the last value sent. A VSC restart goes back to the stored value.
+   - **Bypass setpoint** (15–30 °C). The unit can't report it, so HA shows the last value sent. Saved on the VSC (see below).
+   - **Humidity setpoint** (50–85 %) and **Frost protection level** (0 to −5 °C), read back from `/tmp/modes`. Saved on the VSC.
+   - **Night mode** and **Holiday mode** (switches): what the Night/Holiday screen keys do, for the hours/days set on the screen. In HASSOS mode their timers are held, so they stay on until turned off. Saved on the VSC; after a restart they start again for the full time. The icons on the screen still need checking (**requires further testing**).
+   - **Screen timeout** (0–120 min, 0 = never sleep). Saved on the VSC.
+   - **Run hours** and **Filter hours** (from es-lcd's own counters, `/tmp/runtime`), **Filter change due** (on above 8759 filter hours, when es-lcd shows its filter icon) and the **Reset filter hours** button, which does what the Maintenance screen's filter reset does and saves it (**requires further testing**).
    - **Bypass active** (the unit's decision, `/tmp/bypass_state`)
    - **Humidity** (%), **Extract air temperature** and **Intake air temperature** (°C), from `/tmp/sensors`. Unknown when the unit reports the sensor as faulty.
    - **Running fan speed** (1/2/3): the speed the unit confirms it is running, not just the one requested. It comes from the unit's acknowledgement (p7 bit 0x20); the reply's own speed bits stay at speed 1, so they aren't used.
 
      ![MRXBOX sensors card: bypass active, temperatures, humidity and running fan speed](../../docs/images/ha-mrxbox-sensors.png)
-   - **Communication with unit** and the fault sensors **Supply fan fault**, **Extract fan fault**, **Cooler fault** and **Frost fault** (under Diagnostic). The faults are unknown while there is no communication.
-   - **Requires further testing:** **Heater fault** and **Test routine required** (under Diagnostic). They are decoded the way es-lcd reads them, but not yet checked against a real fault. Heater fault shows ON on my unit, which may just mean no heater is fitted. Test routine required uses a p9 bit that es-lcd also draws as fan bar 3.
-   - **Supply / Extract speed 1/2/3 airflow** (1–100 %, under Configuration). Not saved on the VSC, so a restart goes back to the commissioned values.
+   - **Communication with unit** and the fault sensors **Supply fan fault**, **Extract fan fault** and **Frost fault** (under Diagnostic). The faults are unknown while there is no communication.
+   - **Requires further testing:** **Heater fault**, **Cooler fault** and **Test routine required** (under Diagnostic). They are decoded the way es-lcd reads them, but not yet checked against a real fault. Heater and cooler are optional add-ons and my unit has neither: Heater fault shows ON there and Cooler fault OFF, so both are disabled in my HA. Disable them too if your unit has no heater or cooler. Test routine required uses a p9 bit that es-lcd also draws as fan bar 3.
+   - **Supply / Extract speed 1/2/3 airflow** (1–100 %, under Configuration). Saved on the VSC.
+   - **Saving:** everything set from HA lasts across a VSC restart. Airflow, bypass setpoint, humidity and frost go into es-lcd's own settings file (`setup3`, written by es-lcd's own save routine, the same file the screen's settings use). Night, holiday and frost are also kept in `/etc/modes`, and the screen timeout in `/etc/screen_timeout`. Tested: values changed from HA, VSC rebooted, all came back.
    - **Debug logging** (switch, under Configuration). Off by default and off again after a VSC restart. When on, `i2clog.so` writes its log to `/i2clog.txt` and the bridge publishes each line to `vsc/log` (not retained). To watch it: Settings → Devices & services → MQTT → Configure → Listen to a topic `vsc/log`.
    - **Debug log** (sensor, under Diagnostic). Once a second the bridge also sends the new log lines as one batch to `vsc/log_batch`. The state is the batch number and the `lines` attribute holds the lines. HA's recorder keeps every batch, so the log can be read back from the sensor's history (for example with the history API or an MCP tool), not only watched live. The text is in the `lines` attribute (open the sensor and expand Attributes). To show it on a dashboard, add a Markdown card with this content:
 
@@ -98,7 +103,7 @@ The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `l
    ![MRXBOX controls, airflow settings and debug logging](../../docs/images/ha-mrxbox-config.png)
 3. The bridge types shell lines on the console: a state poll every 20 s and the `/tmp` file commands. If it sees `login:` it logs in as root. Those lines show up in the console log and any telnet session. The poll waits while `/send` is in use (30 s after the last line), so it can't break into a typed upload.
 
-Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, `vsc/humidity`, `vsc/temp_extract`, `vsc/temp_intake`, `vsc/fan_running`, `vsc/comms`, `vsc/fault_supply_fan`, `vsc/fault_extract_fan`, `vsc/fault_heater`, `vsc/fault_cooler`, `vsc/fault_frost`, `vsc/test_required`, `vsc/air_s1`…`vsc/air_s3`, `vsc/air_e1`…`vsc/air_e3`, `vsc/debug`, each with `/set` where HA can write; `vsc/log` carries the debug log, one line per message, and `vsc/log_batch` the same lines as JSON batches; `vsc/status` is online/offline).
+Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, `vsc/humidity`, `vsc/temp_extract`, `vsc/temp_intake`, `vsc/fan_running`, `vsc/comms`, `vsc/fault_supply_fan`, `vsc/fault_extract_fan`, `vsc/fault_heater`, `vsc/fault_cooler`, `vsc/fault_frost`, `vsc/test_required`, `vsc/air_s1`…`vsc/air_s3`, `vsc/air_e1`…`vsc/air_e3`, `vsc/humidity_sp`, `vsc/frost_sp`, `vsc/night`, `vsc/holiday`, `vsc/screen_timeout`, `vsc/run_hours`, `vsc/filter_hours`, `vsc/filter_change`, `vsc/filter_reset`, `vsc/debug`, each with `/set` where HA can write; `vsc/log` carries the debug log, one line per message, and `vsc/log_batch` the same lines as JSON batches; `vsc/status` is online/offline).
 
 ## Things to know
 
