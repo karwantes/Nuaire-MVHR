@@ -4,3 +4,6 @@ rootfs_p2/
 __pycache__/
 *.so
 esp/*/build/
+# Never publish: disassembly notes and stock artwork
+research/
+welcomepage*.png

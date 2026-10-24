@@ -55,11 +55,12 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 | `tools/armdis.py` | Annotated disassembly of `es-lcd` (pyelftools + capstone) |
 | `tools/mklogo.py` | Makes the replacement boot logo, so you can see the modified card booted |
 | `captures/` | Real I²C logs from my unit |
-| `research/` | Raw notes from the disassembly |
+
+No firmware, card images, disassembly or Nuaire artwork are published here. The tools work on a copy of your own card.
 
 ## Using the logger image
 
-1. Write `disk3_i2clog5.img` (see Releases) to a spare SD card. **Keep your original card safe.**
+1. Build a logger image from your own card (below) and write it to a spare SD card. **Keep your original card safe.**
 2. Boot the VSC. The changed boot logo tells you the modified card is running.
 3. Go to **Maintenance** and tap the Nuaire logo to open the debug page.
    - Page 1 shows the decoded status, the flags and the last TX frame.
@@ -78,18 +79,9 @@ Add `--shell` (`python tools/mkimg.py --shell stock.img my_shell.img`) to start 
 
 `mkimg.py` reuses the first blocks of the unused Wi-Fi module `rt3070sta.ko` for the library, adds `LD_PRELOAD` to `autoexec.bat`, and swaps the boot logo. All writes go to the output copy only.
 
-## SD card images (Releases)
+## SD card images
 
-Images are about 470 MB each, so they are attached to the GitHub Release rather than committed. All are raw dumps of the whole card (two partitions; the ext2 rootfs starts at sector 40960).
-
-| File | SHA-256 | What |
-|---|---|---|
-| `disk3.img` | `91ad9632ced6ebd1cf56fd6e37cc6e4f9506c5b6c8cce0f3610c588556a555e9` | Stock card as shipped (my unit) |
-| `disk3_i2clog5.img` | `9e22006773472cdcb0381632ca30fed9048523bf17c20b106535c18f91bfbfd1` | Stock + latest logger (v5) and both debug pages, tested on the unit |
-| `card_after_test1.img` | `3dfdf1b2dbcec0672b5457a5992f002ad5055efc802f3ac3ae5ff1f8d3fc8c19` | Card read back after the first logger run |
-| `card_run2.img` | `31fbf75b1c902f42043f4dca52b66814c94fce3bb7ec97ce8a1a5db196ab765a` | Card read back after the second logger run |
-
-Hashes are of the uncompressed `.img`.
+Card images contain Nuaire's firmware, so none are published. Image your own card (two partitions; the ext2 rootfs starts at sector 40960) and keep the original safe. For reference, the SHA-256 of my stock card was `91ad9632ced6ebd1cf56fd6e37cc6e4f9506c5b6c8cce0f3610c588556a555e9`.
 
 ## Plan: an ESP instead of the VSC
 
