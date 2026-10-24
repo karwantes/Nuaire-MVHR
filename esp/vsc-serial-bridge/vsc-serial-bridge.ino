@@ -184,10 +184,16 @@ static int mqBypassTemp = 0;    // last setpoint sent; the unit can't report it
 static const char *const AIR_KEY[6] = {"air_s1", "air_s2", "air_s3", "air_e1", "air_e2", "air_e3"};
 static int mqAir[6];
 static bool mqAirKnown = false;
+// Fault bits from /tmp/sensors P8/P9 (active low: a clear bit is a fault). Heater fault and
+// "Test routine required" still need testing: the heater bit reads as a fault on a unit that may
+// have no heater, and p9 0x04 is also what es-lcd draws as fan bar 3.
+static const char *const FAULT_KEY[6] = {"fault_supply_fan", "fault_extract_fan", "fault_heater", "fault_cooler", "fault_frost", "test_required"};
+static const char *const FAULT_NAME[6] = {"Supply fan fault", "Extract fan fault", "Heater fault", "Cooler fault", "Frost fault", "Test routine required"};
+static const uint8_t FAULT_BYTE[6] = {8, 8, 8, 8, 9, 9}, FAULT_BIT[6] = {0x08, 0x20, 0x40, 0x80, 0x20, 0x04};
 
 // One console line that reports the state. "@""S" so the echoed command line
 // doesn't look like the answer.
-#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
+#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"T\" $(cat /tmp/sensors 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
 
 static void mqPub(const char *topic, const char *payload, bool retain = true) {
   if (mq && mqConnected) esp_mqtt_client_publish(mq, topic, payload, 0, 0, retain);
@@ -340,6 +346,21 @@ static void mqAnnounceAll() {
   mqDiscovery("sensor", "debug_log", "Debug log",
               "\"stat_t\":\"" MQ_BASE "/log_batch\",\"val_tpl\":\"{{ value_json.seq }}\",\"json_attr_t\":\"" MQ_BASE "/log_batch\","
               "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:text-long\"");
+  mqDiscovery("sensor", "humidity", "Humidity",
+              "\"stat_t\":\"" MQ_BASE "/humidity\",\"dev_cla\":\"humidity\",\"stat_cla\":\"measurement\",\"unit_of_meas\":\"%\"");
+  mqDiscovery("sensor", "temp_extract", "Extract air temperature",
+              "\"stat_t\":\"" MQ_BASE "/temp_extract\",\"dev_cla\":\"temperature\",\"stat_cla\":\"measurement\",\"unit_of_meas\":\"°C\"");
+  mqDiscovery("sensor", "temp_intake", "Intake air temperature",
+              "\"stat_t\":\"" MQ_BASE "/temp_intake\",\"dev_cla\":\"temperature\",\"stat_cla\":\"measurement\",\"unit_of_meas\":\"°C\"");
+  mqDiscovery("sensor", "fan_running", "Running fan speed",
+              "\"stat_t\":\"" MQ_BASE "/fan_running\",\"ic\":\"mdi:fan-auto\"");
+  mqDiscovery("binary_sensor", "comms", "Communication with unit",
+              "\"stat_t\":\"" MQ_BASE "/comms\",\"dev_cla\":\"connectivity\",\"ent_cat\":\"diagnostic\"");
+  for (int i = 0; i < 6; i++) {
+    char extra[200];
+    snprintf(extra, sizeof extra, "\"stat_t\":\"" MQ_BASE "/%s\",\"dev_cla\":\"problem\",\"ent_cat\":\"diagnostic\"", FAULT_KEY[i]);
+    mqDiscovery("binary_sensor", FAULT_KEY[i], FAULT_NAME[i], extra);
+  }
   for (int i = 0; i < 6; i++) {
     char name[40], extra[256];
     snprintf(name, sizeof name, "%s speed %d airflow", i < 3 ? "Supply" : "Extract", i % 3 + 1);
@@ -397,6 +418,30 @@ static void mqHandle(const char *topic, const char *data) {
   mqLastPoll = millis();
 }
 
+// "@T EXT IN RH SPD P8 P9" (/tmp/sensors) -> sensor topics. "-" is a sensor fault: HA shows
+// "None" as unknown. P8 = P9 = 255 is no communications with the unit.
+static void mqSensors(const char *t) {
+  if (!t) return;
+  char tok[6][8];
+  if (sscanf(t + 2, "%7s %7s %7s %7s %7s %7s", tok[0], tok[1], tok[2], tok[3], tok[4], tok[5]) != 6) return;
+  int p8 = atoi(tok[4]), p9 = atoi(tok[5]);
+  bool comms = !(p8 == 255 && p9 == 255);
+  mqPub(MQ_BASE "/comms", comms ? "ON" : "OFF");
+  static const char *const KEY[4] = {"temp_extract", "temp_intake", "humidity", "fan_running"};
+  for (int i = 0; i < 4; i++) {
+    char topic[32];
+    snprintf(topic, sizeof topic, MQ_BASE "/%s", KEY[i]);
+    bool fault = tok[i][0] == '-' && !tok[i][1];   // "-5" is a temperature, "-" a fault
+    mqPub(topic, !comms || fault ? "None" : tok[i]);
+  }
+  for (int i = 0; i < 6; i++) {
+    char topic[40];
+    snprintf(topic, sizeof topic, MQ_BASE "/%s", FAULT_KEY[i]);
+    int b = FAULT_BYTE[i] == 8 ? p8 : p9;
+    mqPub(topic, !comms ? "None" : (b & FAULT_BIT[i]) ? "OFF" : "ON");
+  }
+}
+
 // "@L <log line>" -> vsc/log (only while debug logging is on);
 // "@S 1 @A 18 32 100 18 32 100 /tmp/speed2 /tmp/bypass_on" -> state topics
 static void mqParse(const char *line) {
@@ -415,6 +460,7 @@ static void mqParse(const char *line) {
   mqPub(MQ_BASE "/bypass", bon ? "On" : boff ? "Off" : "Auto");
   mqPub(MQ_BASE "/debug", strstr(p, "/tmp/debug") ? "ON" : "OFF");
   if (*p == '0' || *p == '1') mqPub(MQ_BASE "/bypass_state", *p == '1' ? "ON" : "OFF");
+  mqSensors(strstr(p, "@T"));
   const char *a = strstr(p, "@A");
   if (!a) return;
   int v[6];

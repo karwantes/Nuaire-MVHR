@@ -152,6 +152,7 @@ For now, HA uses small files on the unit (through the ESP serial bridge in `esp/
 | `cat /tmp/bypass_state` | `1` = the unit has bypass ON, `0` = heat recovery. Updated when it changes |
 | `echo 20 35 100 20 35 100 > /tmp/airflow` | Sets the airflow % for supply speed 1/2/3, then extract speed 1/2/3, then deletes itself. Ignored unless each value is 1–100. Not saved, so a restart goes back to the commissioned values |
 | `cat /tmp/airflow_state` | The airflow % in use, same order. Updated when it changes |
+| `cat /tmp/sensors` | `EXT IN RH SPD P8 P9`: extract-air and intake-air temperature (°C), humidity (%), running fan speed (1/2/3), and the raw fault bytes p8 and p9 in decimal (a clear bit is a fault; both 255 = no communication). `-` when a sensor reports a fault. Updated when it changes |
 | `touch /tmp/debug` | Debug logging on: log lines go to `/i2clog.txt` and to the console as `@L <line>` (the bridge sends them to MQTT). `rm /tmp/debug` turns it off. Off after a restart |
 
 These work with the tick box off too. Without HASSOS mode, es-lcd's timers end speed 2/3 as normal, and bypass on/off after 12 h / 8 h.

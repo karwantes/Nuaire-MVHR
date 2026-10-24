@@ -70,6 +70,12 @@ The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `l
    - **Bypass** (select Auto/On/Off)
    - **Bypass setpoint** (15–30 °C). The unit can't report it, so HA shows the last value sent. A VSC restart goes back to the stored value.
    - **Bypass active** (the unit's decision, `/tmp/bypass_state`)
+   - **Humidity** (%), **Extract air temperature** and **Intake air temperature** (°C), from `/tmp/sensors`. Unknown when the unit reports the sensor as faulty.
+   - **Running fan speed** (1/2/3): the speed the unit confirms it is running, not just the one requested. It comes from the unit's acknowledgement (p7 bit 0x20); the reply's own speed bits stay at speed 1, so they aren't used.
+
+     ![MRXBOX sensors card: bypass active, temperatures, humidity and running fan speed](../../docs/images/ha-mrxbox-sensors.png)
+   - **Communication with unit** and the fault sensors **Supply fan fault**, **Extract fan fault**, **Cooler fault** and **Frost fault** (under Diagnostic). The faults are unknown while there is no communication.
+   - **Requires further testing:** **Heater fault** and **Test routine required** (under Diagnostic). They are decoded the way es-lcd reads them, but not yet checked against a real fault. Heater fault shows ON on my unit, which may just mean no heater is fitted. Test routine required uses a p9 bit that es-lcd also draws as fan bar 3.
    - **Supply / Extract speed 1/2/3 airflow** (1–100 %, under Configuration). Not saved on the VSC, so a restart goes back to the commissioned values.
    - **Debug logging** (switch, under Configuration). Off by default and off again after a VSC restart. When on, `i2clog.so` writes its log to `/i2clog.txt` and the bridge publishes each line to `vsc/log` (not retained). To watch it: Settings → Devices & services → MQTT → Configure → Listen to a topic `vsc/log`.
    - **Debug log** (sensor, under Diagnostic). Once a second the bridge also sends the new log lines as one batch to `vsc/log_batch`. The state is the batch number and the `lines` attribute holds the lines. HA's recorder keeps every batch, so the log can be read back from the sensor's history (for example with the history API or an MCP tool), not only watched live. The text is in the `lines` attribute (open the sensor and expand Attributes). To show it on a dashboard, add a Markdown card with this content:
@@ -92,7 +98,7 @@ The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `l
    ![MRXBOX controls, airflow settings and debug logging](../../docs/images/ha-mrxbox-config.png)
 3. The bridge types shell lines on the console: a state poll every 20 s and the `/tmp` file commands. If it sees `login:` it logs in as root. Those lines show up in the console log and any telnet session. The poll waits while `/send` is in use (30 s after the last line), so it can't break into a typed upload.
 
-Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, `vsc/air_s1`…`vsc/air_s3`, `vsc/air_e1`…`vsc/air_e3`, `vsc/debug`, each with `/set` where HA can write; `vsc/log` carries the debug log, one line per message, and `vsc/log_batch` the same lines as JSON batches; `vsc/status` is online/offline).
+Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, `vsc/humidity`, `vsc/temp_extract`, `vsc/temp_intake`, `vsc/fan_running`, `vsc/comms`, `vsc/fault_supply_fan`, `vsc/fault_extract_fan`, `vsc/fault_heater`, `vsc/fault_cooler`, `vsc/fault_frost`, `vsc/test_required`, `vsc/air_s1`…`vsc/air_s3`, `vsc/air_e1`…`vsc/air_e3`, `vsc/debug`, each with `/set` where HA can write; `vsc/log` carries the debug log, one line per message, and `vsc/log_batch` the same lines as JSON batches; `vsc/status` is online/offline).
 
 ## Things to know
 

@@ -65,7 +65,7 @@ So:
 - **p9 0x08 = 1 means the unit is in bypass.** es-lcd never reads it. In the last state the unit's **HX Bypass** status LED was lit (top LED in Fig 21 of Nuaire I&M 671797).
 - **p9 0x08 is the unit's decision, not the damper's position.** It changed within about 1 s of the Commissioning disable and re-enable, but only 63 s after the override ended (the unit re-checking the setpoint once a minute). A wax actuator can't move in 1 s. No other byte from the unit tracks the bypass, so this is the best status available.
 - **How es-lcd builds the bits:** byFsa rebuilds d0 every pass from the timers. 0x1e31c running clears 0x08; 0x1e320 running clears 0x80 (after setting bits 4–6); 0x1e31e running clears 0x04. The timers count down once a minute, and HASSOS mode holds them.
-- **Shell control** (i2clog.so, see `theme/README.md`): `/tmp/bypass_on` runs 0x1e320 (720 min), `/tmp/bypass_off` runs 0x1e31c (480 min), neither = auto. `/tmp/bypasstemp` writes the setpoint into S0 (0x6ab71, sent as d1). `/tmp/bypass_state` holds p9 0x08 as `1`/`0`, from replies with a good checksum. `/tmp/airflow` ("S1 S2 S3 E1 E2 E3" in %) writes 0x708ac (bit 0 kept) and the 0x1e2aa–af screen values; `/tmp/airflow_state` reports 0x708ac in the same order.
+- **Shell control** (i2clog.so, see `theme/README.md`): `/tmp/bypass_on` runs 0x1e320 (720 min), `/tmp/bypass_off` runs 0x1e31c (480 min), neither = auto. `/tmp/bypasstemp` writes the setpoint into S0 (0x6ab71, sent as d1). `/tmp/bypass_state` holds p9 0x08 as `1`/`0`, from replies with a good checksum. `/tmp/airflow` ("S1 S2 S3 E1 E2 E3" in %) writes 0x708ac (bit 0 kept) and the 0x1e2aa–af screen values; `/tmp/airflow_state` reports 0x708ac in the same order. `/tmp/sensors` ("EXT IN RH SPD P8 P9") holds p5, p16 and p18 decoded, the running speed (p7 bit 0x20 and 0x708ca) and the raw p8/p9 fault bytes, from replies with a good checksum.
 
 ## I²C framing (MSP430 at 0x26)
 - **Write (TX):** `cmd, data[0..n-1], chk` where `chk = ~(data[0] ^ … ^ data[n-1])`. The settings frame is `cmd 0x20`, n = 11. A 100 µs pause follows.
@@ -129,7 +129,7 @@ The fan bars on Home are drawn coloured only when both 0x08 and 0x20 are set (bo
 | 0x04 | Clear → "Test routine required!", and 0x1e334 = 1. Also lights fan bar 3 |
 | 0x02 | With 0x04, lights fan bar 2: bar 2 is lit unless both bits are set |
 
-So p9 bits 1–2 report the running fan speed: both set = speed 1, 0x02 clear = speed 2, 0x04 clear = speed 3.
+es-lcd draws fan bars 2 and 3 from these bits, as if they were the running speed (both set = speed 1, 0x02 clear = speed 2, 0x04 clear = speed 3). On my unit they stayed at f6 (speed 1) during speed 2 and speed 3, so they don't report the running speed. The running speed comes from p7 bit 0x20 (clear while the unit runs speed 2/3) and es-lcd's 0c/0d selector (0x708ca: 1 = speed 3). This was tested live with `/tmp/speed2` and `/tmp/speed3`.
 
 ### Diagnostics screen (33), top to bottom (labels confirmed from `Diagnostics.png`)
 1. Extractor Fan: p8 0x20 (so "Fan 2" = extract)

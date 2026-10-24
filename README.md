@@ -19,6 +19,7 @@ Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-
 - [x] Bus cable wiring measured: red +10 V, blue 0 V, green RS485 A, yellow RS485 B (see [docs/protocol.md](docs/protocol.md#wiring-vsc-to-mrxbox-4-core-bus-cable)).
 - [x] Linux console found: the **LINUX TERMINAL** header next to the SD card (RS232 level, 115200 8N1). A card built with `mkimg.py --shell` gives a root login there; the ESP bridge makes it reachable over WiFi (see [captures/vsc_console_boot.txt](captures/vsc_console_boot.txt)).
 - [x] Custom screen theme (dark) and a **Controlled by HASSOS** tick box that hands control to Home Assistant, with the screen as a manual override (see [theme/README.md](theme/README.md)).
+- [x] Home Assistant through the ESP bridge (MQTT): speed, bypass, airflow %, humidity, both temperatures, running speed, comms and fault sensors, debug log. Heater fault and Test routine required still need testing (see [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt)).
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
 - [ ] ESP acting as the controller (replacing the VSC).

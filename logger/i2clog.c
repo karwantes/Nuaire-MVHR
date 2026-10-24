@@ -252,7 +252,8 @@ static void draw(void)
     p = half(p, q[16]); p = putstr(p, (q[16] ^ q[17]) == 0xff ? " C" : " C (bad inv)"); line(7, p, b, 0xff);
     /* p7 bit 0x20 and p11 bits 0x02/0x04/0x10 clear while the unit is boosting */
     p = putstr(b, "p7-15: "); p = hxs(p, q + 7, 9); if (!(q[7] & 0x20)) p = putstr(p, "BST"); line(8, p, b, 0xff);
-    /* p8/p9 fault bits are active when clear; p9 bits 1-2 give the running speed */
+    /* p8/p9 fault bits are active when clear; p9 bits 1-2 are speed bits but stayed at speed 1
+       during a shell speed 2, so the shell sensor uses p7 instead (sensors_state) */
     p = putstr(b, "Spd "); *p++ = !(q[9] & 4) ? '3' : !(q[9] & 2) ? '2' : '1'; p = putstr(p, " Flt:");
     if ((q[8] & 0xe8) == 0xe8 && (q[9] & 0x24) == 0x24) p = putstr(p, " none");
     if (!(q[8] & 0x40)) p = putstr(p, " Htr");
@@ -649,6 +650,50 @@ static void bypass_state(const unsigned char *q)
     stamp(&p); p = putstr(p, s ? "BYPASS on\n" : "BYPASS off\n"); emit(line, p - line);
 }
 
+/* Sensors for the shell: /tmp/sensors "EXT IN RH SPD P8 P9", written when it changes, from replies
+   with a good checksum. EXT = extract-air temp (p5), IN = fresh-air intake temp (p16), both in °C;
+   RH = humidity % (p18); "-" when the sensor reports a fault or its check byte is wrong. SPD = the
+   running fan speed: 1 unless the unit acknowledges the timed speed (p7 bit 0x20 clear), then 2 or
+   3 from es-lcd's 0c/0d selector. p9 bits 1-2 stay at speed 1 while it runs, so they are not used.
+   P8/P9 = the raw fault bytes in decimal (active low; both 255 =
+   no communications), decoded by the bridge. */
+static char sens_last[48];
+
+static char *puttemp(char *p, unsigned char v, unsigned char chk)
+{
+    int t = v >> 1;
+    if (t & 0x40) t -= 128;
+    if ((unsigned char)~v != chk || t == -63) { *p++ = '-'; return p; }
+    if (t < 0) { *p++ = '-'; t = -t; }
+    return putdec(p, t);
+}
+
+static void sensors_state(const unsigned char *q)
+{
+    unsigned char x = 0xff;
+    for (int i = 7; i < 15; i++) x ^= q[i];
+    if (x != q[15]) return;
+    char line[48], *p = line;
+    p = puttemp(p, q[5], q[6]); *p++ = ' ';
+    p = puttemp(p, q[16], q[17]); *p++ = ' ';
+    u32 h = rh(q[18]);
+    if (h == 0 || h == 127) *p++ = '-'; else p = putdec(p, h);
+    *p++ = ' ';
+    *p++ = q[7] & 0x20 ? '1' : BST_SEL ? '3' : '2';
+    *p++ = ' '; p = putdec(p, q[8]);
+    *p++ = ' '; p = putdec(p, q[9]);
+    *p++ = '\n'; *p = 0;
+    int same = 1;
+    for (int i = 0; i <= p - line; i++) if (sens_last[i] != line[i]) { same = 0; break; }
+    if (same) return;
+    for (int i = 0; i <= p - line; i++) sens_last[i] = line[i];
+    long fd = sc4(5, (long)"/tmp/sensors", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)line, p - line, 0); sc4(6, fd, 0, 0, 0); }
+    char l2[64], *r = l2;
+    stamp(&r); r = putstr(r, "SENS "); for (char *s = line; s < p; s++) *r++ = *s;
+    emit(l2, r - l2);
+}
+
 /* HASSOS mode ("Controlled by HASSOS"): while /etc/hassos exists es-lcd only follows touches and
    the shell files. es-lcd's own automations are its minute countdowns, which end a mode or a
    timed speed without a touch: 0x1e320 summer bypass override, 0x1e322 holiday, 0x1e324 night,
@@ -746,6 +791,7 @@ long read(int fd, void *buf, unsigned long n)
             for (int i = 0; i < 28; i++) rx[i] = ((unsigned char *)buf)[i];
             nrx++; t_rx = nowsec();
             bypass_state(rx + 8);
+            sensors_state(rx + 8);
             for (int k = 0; k < 3; k++)
                 if (rq[1] == REQS[k]) { /* volatile keeps the compiler from emitting a memcpy import */
                     volatile unsigned char *o = rxk[k];
