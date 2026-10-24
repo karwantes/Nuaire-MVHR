@@ -18,7 +18,7 @@ The header next to the SD card is silkscreened **LINUX TERMINAL** (0V, TX, RX; 0
 | | RS232 TX out | RX |
 
 - Through a MAX3232 module the levels are already TTL polarity, so set the bridge to **TTL (normal)** with the inv button. The firmware defaults to **RS232 (inverted)**, which is only for the quick hack below.
-- Quick hack without a module: a 10 kΩ resistor in series between VSC TX and GPIO16, with the bridge on RS232 (inverted). Leave TX off. Use it only to read the boot log.
+- Quick hack without a module: a 10 kΩ resistor in series between VSC TX and GPIO16, with the bridge on RS232 (inverted). Leave TX off. Use it only to read the boot log. Diagram: [docs/convert-card.md](../../docs/convert-card.md#quick-check-with-a-10k-resistor-listen-only).
 - **Never connect the red bus wire (+10 V) to the ESP.**
 - Power the ESP from USB for now.
 - On a WROVER module, GPIO16/17 are taken by PSRAM. Change `VSC_RX_PIN` / `VSC_TX_PIN` (for example to 25/26).

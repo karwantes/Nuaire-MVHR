@@ -18,6 +18,7 @@ You need no Linux, no card images and no command line. The tool backs up your ca
 | 5 V USB power supply and cable | Powers the ESP. Don't take power from the VSC or the bus cable. |
 | USB SD card reader | For converting the card once on a PC. |
 | Windows PC | Runs `vscconv.exe`. Needs free disk space about the size of the card (the backup), 2 GB on a stock card. |
+| Optional: 10 kΩ resistor | Only for the [listen-only quick check](#quick-check-with-a-10k-resistor-listen-only) without a MAX3232 module. |
 | Optional: 3.3 V MAX3485 module | Listen-only tap on the RS485 bus, see [the bridge](../esp/vsc-serial-bridge/README.md#rs485-bus-tap-optional-listen-only). Not needed for Home Assistant. |
 
 ## Connection diagram
@@ -37,6 +38,22 @@ You need no Linux, no card images and no command line. The tool backs up your ca
 - The header is silkscreened **LINUX TERMINAL** and sits next to the SD card. 0V is the pin nearest the blue sticker. TX and RX are named from the VSC's side. The board photos are in [images/pcb_front_annotated.jpg](images/pcb_front_annotated.jpg).
 - **Never connect the red bus wire (+10 V) to the ESP or the module.**
 - If the bridge log shows nothing at all, TX and RX are probably swapped.
+
+### Quick check with a 10k resistor (listen only)
+
+If you don't have a MAX3232 module yet, you can still watch the console, for example to see that a converted card boots to `login:`. You need one 10 kΩ resistor and 2 jumper wires.
+
+![VSC TX to ESP32 GPIO16 through a 10 kΩ resistor, 0V to GND](images/vsc-console-resistor-hack.svg)
+
+| VSC LINUX TERMINAL | | ESP32 |
+|---|---|---|
+| 0V | wire | GND |
+| TX | 10 kΩ resistor in series | GPIO16 (RX) |
+| RX | not connected | GPIO17 not connected |
+
+- In the bridge, set the polarity to **RS232 (inverted)** (the default) and turn **TX off**.
+- The resistor limits the current from the header's RS232 swing (about −5 V idle) into the ESP pin. **Never connect VSC TX straight to the ESP.**
+- **Listen only.** The ESP can't type to the VSC, so it can't log in and Home Assistant gets nothing. For Home Assistant, use the MAX3232 module as above.
 
 ## Step by step
 
