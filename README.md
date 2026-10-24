@@ -86,12 +86,11 @@ Card images contain Nuaire's firmware, so none are published. Make your own from
 ### 1. Copy your card to an image file
 
 1. Power the unit off at the isolator and take the SD card out of the VSC board.
-2. Lock the card: slide its write-protect tab down, so nothing can write to it by accident.
-3. Put it in a card reader on your PC.
-4. Read the whole card to a file called `stock.img`:
+2. Put it in a card reader on your PC.
+3. Read the whole card to a file called `stock.img`:
    - **Windows:** install [Win32 Disk Imager](https://sourceforge.net/projects/win32diskimager/). Pick the card's drive letter, type a path ending in `stock.img`, leave **Read Only Allocated Partitions** unticked, and press **Read** (not Write). If Windows offers to format the card, press **Cancel**.
    - **Linux:** find the card with `lsblk` (e.g. `/dev/sdb`), then `sudo dd if=/dev/sdb of=stock.img bs=1M status=progress`.
-5. Put the original card back in the VSC (unlock it first) and power the unit on. Keep `stock.img` safe as your backup.
+4. Put the original card back in the VSC and power the unit on. Keep `stock.img` safe as your backup.
 
 My card gave a 493,879,296-byte image with SHA-256 `91ad9632ced6ebd1cf56fd6e37cc6e4f9506c5b6c8cce0f3610c588556a555e9`. If yours matches, it is the same firmware build these notes were written against. Check it with `certutil -hashfile stock.img SHA256` (Windows) or `sha256sum stock.img` (Linux).
 
