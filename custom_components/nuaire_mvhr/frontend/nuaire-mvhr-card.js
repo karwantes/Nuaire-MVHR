@@ -4,7 +4,7 @@
  * with the ESP bridge's MQTT entities (mrxbox_*). The integration registers this file,
  * so the card type is "custom:nuaire-mvhr-card" with no dashboard resource to add.
  */
-const VERSION = "0.2.2-alpha";
+const VERSION = "0.2.3-alpha";
 
 const COLORS = {
   intake: "#3fa9f5", supply: "#f5a623", extract: "#e35d4a", exhaust: "#6bb0d6",
@@ -227,7 +227,8 @@ class NuaireMvhrCard extends HTMLElement {
   _bypass() {
     const s = this._st("bypass_active");
     if (!s || BAD.has(s.state)) return { tone: this._color("warn"), text: "Bypass ?", open: false };
-    const open = s.state === "on";
+    // Some units report "on" while the damper is shut and all the air goes through the exchanger.
+    const open = (s.state === "on") !== !!this._config.invert_bypass;
     return { tone: open ? this._color("ac_cool") : this._color("core"), text: open ? "Bypass open" : "Bypass closed", open };
   }
 
@@ -654,6 +655,7 @@ const LABELS = {
   show_controls: "Show controls", show_status: "Show status chips", fit_height: "Fit to screen height",
   show_coil: "Show coil (heating/cooling after the MVHR)",
   bottom_offset: "Space under the card for a fixed bottom bar (px)",
+  invert_bypass: "Bypass active 'on' means air goes through the exchanger",
   supply_temp: "Supply air temperature (after the MVHR)", exhaust_temp: "Exhaust air temperature",
   efficiency: "Heat recovery efficiency sensor",
   house_temp: "House temperature", house_humidity: "House humidity", house_target: "House target (climate)",
@@ -674,6 +676,7 @@ function editorSchema(cfg) {
       { name: "show_status", selector: { boolean: {} } },
       { name: "fit_height", selector: { boolean: {} } },
       { name: "show_coil", selector: { boolean: {} } },
+      { name: "invert_bypass", selector: { boolean: {} } },
     ] },
     { name: "bottom_offset", selector: { number: { min: 0, max: 200, step: 1, mode: "box", unit_of_measurement: "px" } } },
     { type: "expandable", name: "entities", title: "Extra sensors", schema: [

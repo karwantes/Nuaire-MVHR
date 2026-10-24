@@ -89,6 +89,8 @@ visual editor:
   humidity and target) are optional.
 - **Show coil** adds a heating/cooling coil after the MVHR, with its own sensors. It's off
   by default.
+- **Bypass active 'on' means air goes through the exchanger** flips the bypass drawing, for
+  units whose Bypass active sensor reads on while the damper is shut.
 - Every box, value and chip opens its entity; the controls row sets fan speed, bypass,
   bypass setpoint, night and holiday.
 - The layout switches to portrait below 720 px wide and scales up to 4K without overlaps.
