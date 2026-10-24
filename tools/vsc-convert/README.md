@@ -20,7 +20,14 @@ boot script with no shell, and Ctrl-C doesn't reach it. So the card has to come 
      reaches the console login.
 5. Reads every written block back and checks the card now reads as converted.
 
-**Restore** writes a backup back over the whole card and checks it by SHA256.
+**Restore** writes a backup back over the whole card and reads it all back to check it by
+SHA256. It checks the backup file against its `.sha256` first only if that file sits next to
+it with the same name, so keep the two together. The menu only offers cards it recognises
+as a VSC card; for a blank or replacement card use `restore <disk> <backup.img>` from an
+admin command prompt (no confirmation, **requires further testing**). See
+[docs/convert-card.md](../../docs/convert-card.md#9-restore-and-recovery).
+
+The backup is saved in the current folder and needs free space the size of the card.
 
 ## Windows
 
@@ -32,13 +39,14 @@ accept the admin prompt, pick 1 to convert. Close any Explorer window on the car
 
 Build: `build_exe.ps1` (needs PyInstaller).
 
-## Linux (experimental)
+## Linux
 
 ```
 sudo python3 vscconv.py
 ```
 
-Same menu. Needs `i2clog.so` next to the script. **Requires further testing.**
+Same menu. Needs `i2clog.so` next to the script. Tested in WSL2 (Ubuntu) with the card
+reader passed through by usbipd-win; a native Linux PC requires further testing.
 
 ## Command line
 
@@ -56,7 +64,11 @@ vscconv.py restore <target> <backup.img>
   the expected blocks, restore gives back the stock image bit for bit.
 - On a real card in a USB reader (Windows EXE): backup checked, 26 writes verified. The
   converted card booted in the VSC, the ESP bridge logged in and read the unit.
-- Restore on a real card, and the Linux version on a real card: **requires further
-  testing**.
+- On the same real card in WSL2: status, backup, restore of the stock backup (read back
+  identical, status `stock`), then convert again (26 writes verified). The card then
+  matched a converted copy of the stock image bit for bit.
+- Booting a restored stock card in the VSC, and restoring to a blank or replacement card:
+  **requires further testing**.
+- Tested release: vscconv-1.0. The 26 writes are for that release's `i2clog.so`.
 
 Step-by-step guide with parts and wiring: [docs/convert-card.md](../../docs/convert-card.md).

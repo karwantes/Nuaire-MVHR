@@ -18,7 +18,7 @@ The header next to the SD card is silkscreened **LINUX TERMINAL** (0V, TX, RX; 0
 | | RS232 TX out | RX |
 
 - Through a MAX3232 module the levels are already TTL polarity, so set the bridge to **TTL (normal)** with the inv button. The firmware defaults to **RS232 (inverted)**, which is only for the quick hack below.
-- Quick hack without a module: a 10 kΩ resistor in series between VSC TX and GPIO16, with the bridge on RS232 (inverted). Leave TX off. Use it only to read the boot log. Diagram: [docs/convert-card.md](../../docs/convert-card.md#quick-check-with-a-10k-resistor-listen-only).
+- Quick hack without a module: a 10 kΩ resistor in series between VSC TX and GPIO16, with the bridge on RS232 (inverted). Leave TX off. Use it only to read the boot log. Experimental; diagram: [docs/console-listen-only.md](../../docs/console-listen-only.md).
 - **Never connect the red bus wire (+10 V) to the ESP.**
 - Power the ESP from USB for now.
 - On a WROVER module, GPIO16/17 are taken by PSRAM. Change `VSC_RX_PIN` / `VSC_TX_PIN` (for example to 25/26).
@@ -47,7 +47,7 @@ A second input listens to the bus between the VSC and the MRXBOX. Use a **3.3 V 
 
 1. Arduino IDE with the ESP32 board package (Espressif `esp32`). Board: "ESP32 Dev Module".
 2. Flash over USB once. After that you can reflash over WiFi: in Arduino IDE pick the network port `vsc-bridge`, or from the command line run `espota.exe -i <ip> -p 3232 -f vsc-serial-bridge.ino.bin -r` (espota is in the esp32 core's `tools` folder).
-3. WiFi is set on the device, not in the code. On first boot the ESP starts its own network `vsc-bridge` (password `nuaire123`). Join it from a phone, open `http://192.168.4.1/wifi`, and enter your WiFi name and password. The ESP saves them and restarts onto your network.
+3. WiFi is set on the device, not in the code. It needs a 2.4 GHz network. On first boot the ESP starts its own network `vsc-bridge` (password `nuaire123`). Join it from a phone, open `http://192.168.4.1/wifi`, and enter your WiFi name and password. The ESP saves them and restarts onto your network.
 4. If it can't join the saved network within 20 s, it starts the `vsc-bridge` network again so you can fix the settings. You can change them any time at `/wifi`.
 
 ## Use
@@ -112,3 +112,4 @@ Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypa
 - On the stock card, `es-lcd` runs in the foreground of the boot script and fills the console with `Init I2C` / `Success!`, so `getty` never starts and there is no login prompt.
 - With a card converted by `vscconv.exe` (see [docs/convert-card.md](../../docs/convert-card.md)) or built by `tools/mkimg.py --shell`, `es-lcd` runs in the background and you get `login:`. Log in as `root` (no password). A full boot log and shell session is in [captures/vsc_console_boot.txt](../../captures/vsc_console_boot.txt).
 - Everything you do from a shell is on the live SD card. Experiment on a copy of the card, never the original.
+- The web page, telnet (23), bus port (2323) and OTA update (3232) have no password, and the console is a root shell on the VSC. MQTT is unencrypted. Keep the ESP on a trusted network and never forward its ports to the internet.
