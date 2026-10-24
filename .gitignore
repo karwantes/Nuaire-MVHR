@@ -7,3 +7,8 @@ esp/*/build/
 # Never publish: disassembly notes and stock artwork
 research/
 welcomepage*.png
+# Never publish: screen sets (made from stock artwork) and the logo
+theme/dark/
+my_dark/
+overview.png
+theme/logo.py

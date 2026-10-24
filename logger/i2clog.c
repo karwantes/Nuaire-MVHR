@@ -3,7 +3,20 @@ typedef unsigned int u32;
 typedef long ssize_t_;
 #define MAXLOG (3u * 1024 * 1024)
 
-extern int *__errno_location(void);
+/* errno goes through es-lcd's own GOT slot for __errno_location (non-PIE, fixed address). Our own
+   PLT import is never bound by the unit's ld-2.3.3 when preloaded at boot, so calling it jumped to 0.
+   The slot may still point at the lazy resolver, which wants ip = slot address, so call it like a PLT stub. */
+#define ESLCD_GOT_ERRNO 0x1e1a4
+
+__attribute__((noinline, target("arm"))) static int *errno_loc(void)
+{
+    register int *r0 __asm__("r0");
+    __asm__ volatile("mov ip, %1\n\tmov lr, pc\n\tldr pc, [ip]"
+                     : "=r"(r0) : "r"(ESLCD_GOT_ERRNO)
+                     : "r1", "r2", "r3", "ip", "lr", "memory", "cc");
+    return r0;
+}
+#define __errno_location errno_loc
 
 static inline long sc4(long n, long a, long b, long c, long d)
 {
@@ -46,7 +59,8 @@ static void emit(const char *s, int n)
     for (int i = 0; i < n; i++) lbuf[lused + i] = s[i];
     lused += n;
     logged += n;
-    if (now_sec - last_flush >= 1 || lused > 12000) flush(0);
+    if (logged < 65536) flush(1); /* start-up: nothing lost if es-lcd exits or the unit resets */
+    else if (now_sec - last_flush >= 1 || lused > 12000) flush(0);
 }
 
 static char *putstr(char *p, const char *s) { while (*s) *p++ = *s++; return p; }
@@ -120,6 +134,15 @@ typedef int (*f_etr)(int a, int b, int c, int d);
 #define ETR_MAINT 0xad1cu
 #define U8(a) (*(volatile unsigned char *)(a))
 #define U16(a) (*(volatile unsigned short *)(a))
+
+static int themed;
+/* Hidden so calls stay inside the .so and never go through the PLT. */
+__attribute__((visibility("hidden"))) int hassos_get(void);
+__attribute__((visibility("hidden"))) int hassos_toggle(void);
+static void hassos_show(void);
+typedef int (*f_touch)(int x0, int y0, int x1, int y1, int key);
+#define KEY_HASSOS 0x7a
+static u32 hassos_tap;
 
 static unsigned char rx[28], txf[13], rq[3];
 static u32 nrx, ntx, t_rx;
@@ -244,6 +267,11 @@ static int body_maint(int key)
 {
     key &= 0xff;
     if (!dbg) {
+        if (key == KEY_HASSOS) {
+            u32 now = nowsec();
+            if (now - hassos_tap >= 1) { hassos_tap = now; hassos_toggle(); hassos_show(); }
+            return 0;
+        }
         if (key != 0x4e) return ((f_key)BODY_MAINT)(key);
         dbg = 1; page = 0; dbg_t0 = nowsec();
         frame();
@@ -255,10 +283,160 @@ static int body_maint(int key)
     if (nowsec() != dbg_last || nrx != dbg_nrx) draw();
     return 0;
 }
-static int etr_maint(int a, int b, int c, int d) { dbg = 0; return ((f_etr)ETR_MAINT)(a, b, c, d); }
+static int etr_maint(int a, int b, int c, int d)
+{
+    dbg = 0;
+    int r = ((f_etr)ETR_MAINT)(a, b, c, d);
+    if (themed == 1) {
+        if (hassos_get()) hassos_show();
+        ((f_touch)0xf964)(78, 155, 307, 187, KEY_HASSOS);
+    }
+    return r;
+}
+
+/* ---- Dark theme: es-lcd draws runtime text and erase boxes for a white screen. When the dark
+   images are installed (images/.dark exists) its drawing calls are redirected here: dark text
+   becomes light, white or light-grey fills take the colour under the box and the fan speed bars
+   use the theme colours. Each patched function starts with "ldr pc,[pc,#-4]; .word fn". ---- */
+typedef struct { volatile unsigned short *px; int w, h; } scr_t;
+typedef int (*f_font_init)(const char *path, int size);
+typedef int (*f_render)(const char *s, int x, int y, int grey, int a4, void *screen);
+typedef int (*f_img)(const char *name);
+#define RGB565(r, g, b) ((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
+#define C_NAVY 0x08c6   /* #081831 page background */
+#define C_BAR_OFF 0x2a2b /* #29455a */
+#define C_BAR_ON 0x05dd  /* #00baef */
+#define C_MUTED 0x5b90   /* #5a7184 */
+#define C_SELECT 0x0aaf  /* #08557b */
+
+static void fill(scr_t *s, int x, int y, int w, int h, unsigned c)
+{
+    if (x < 0) w += x, x = 0;
+    if (y < 0) h += y, y = 0;
+    if (x + w > s->w) w = s->w - x;
+    if (y + h > s->h) h = s->h - y;
+    for (int j = 0; j < h; j++) {
+        volatile unsigned short *p = s->px + (y + j) * s->w + x;
+        for (int i = 0; i < w; i++) p[i] = c;
+    }
+}
+
+/* Colour under a box: the one most of its four corners share. */
+static unsigned under(scr_t *s, int x, int y, int w, int h)
+{
+    int x1 = x + w - 1, y1 = y + h - 1;
+    if (x < 0 || y < 0 || w < 1 || h < 1 || x1 >= s->w || y1 >= s->h) return C_NAVY;
+    unsigned c[4] = {s->px[y * s->w + x], s->px[y * s->w + x1], s->px[y1 * s->w + x], s->px[y1 * s->w + x1]};
+    for (int i = 0; i < 3; i++)
+        for (int k = i + 1; k < 4; k++) if (c[i] == c[k]) return c[i];
+    return C_NAVY;
+}
+
+static unsigned theme(scr_t *s, int x, int y, int w, int h, int r, int g, int b)
+{
+    r &= 0xff; g &= 0xff; b &= 0xff;
+    if (r == 0xd6 && g == 0x7d) return C_BAR_OFF;            /* fan bars, off */
+    if (r == 0xaf && g == 0xd6 && b == 0x7d) return C_BAR_ON; /* fan bars, on */
+    if (r == 0x3c && g == 0xdc && b == 0x3c) return 0xffff;   /* timed speed mark inside a bar */
+    if (r == 0xc0 && g == 0xc0 && b == 0xc0) return C_MUTED;
+    if (r >= 0xb0 && g >= 0xb0 && b >= 0xb0) return under(s, x, y, w, h);
+    return RGB565(r, g, b);
+}
+
+static int my_box(scr_t *s, int x, int y, int w, int h, int r, int g, int b) /* simplewidget_box */
+{
+    if (!s || y + h > s->h || x + w > s->w) return -1;
+    fill(s, x, y, w, h, theme(s, x, y, w, h, r, g, b));
+    return 0;
+}
+static int my_rect(scr_t *s, int x, int y, int w, int h, int r, int g, int b) /* simplewidget_screen_draw_rectangle */
+{
+    if (!s) return -1;
+    fill(s, x, y, w, h, theme(s, x, y, w, h, r, g, b));
+    return 0;
+}
+static int my_white(scr_t *s, int x, int y, int w, int h) /* simplewidget_screen_set */
+{
+    if (!s || y + h > s->h || x + w > s->w) return -1;
+    fill(s, x, y, w, h, under(s, x, y, w, h));
+    return 0;
+}
+static int my_green(scr_t *s, int x, int y, int w, int h) /* simplewidget_screen_green */
+{
+    if (!s || y + h > s->h || x + w > s->w) return -1;
+    fill(s, x, y, w, h, C_SELECT);
+    return 0;
+}
+/* simplewidget_text_show: the colour is one grey level (0x1f,0,0 is red); dark greys are inverted. */
+static int my_text(int *h, void *screen, int grey, int a4, int a5)
+{
+    if (!screen || !h) return -1;
+    ((f_font_init)0x11db8)((const char *)0x1563c, -1);
+    grey &= 0xffff;
+    if (grey == 0x1f && !(a4 & 0xffff) && !(a5 & 0xffff)) grey = 1;
+    else if (grey < 0x80) grey = 0xff - grey;
+    return ((f_render)0x11ef0)((const char *)(h + 3), h[0], h[1], grey, h[2], screen) >= 0 ? 0 : -1;
+}
+
+static void patch(u32 at, void *fn)
+{
+    volatile u32 *p = (volatile u32 *)at;
+    p[0] = 0xe51ff004; /* ldr pc, [pc, #-4] */
+    p[1] = (u32)fn;
+}
+static int themed = -1;
+static void theme_init(void)
+{
+    if (themed >= 0) return;
+    themed = sc4(33, (long)"/opt/dvsdk/dm355/images/.dark", 0, 0, 0) == 0;
+    if (!themed) return;
+    if (sc4(125, 0x11000, 0x1000, 7, 0) != 0) { themed = 0; return; } /* mprotect rwx */
+    patch(0x1122c, my_white);
+    patch(0x112d8, my_green);
+    patch(0x11384, my_box);
+    patch(0x115c8, my_rect);
+    patch(0x11a10, my_text);
+    sc4(0xf0002, 0x11000, 0x12000, 0, 0); /* cacheflush */
+}
+/* Crash and exit logging: a fatal signal logs pc/lr/fault address, an exit logs EXIT. */
+static void note(const char *s)
+{
+    char line[96], *p = line;
+    stamp(&p); p = putstr(p, s); *p++ = '\n'; emit(line, p - line);
+}
+static char *put32(char *p, u32 v) { for (int s = 24; s >= 0; s -= 8) p = hx(p, v >> s); return p; }
+static void on_crash(int sig, void *info, void *uc)
+{
+    const u32 *sc = (const u32 *)((char *)uc + 20); /* ucontext: flags, link, stack_t, sigcontext */
+    char line[160], *p = line;
+    (void)info;
+    stamp(&p); p = putstr(p, "CRASH sig="); p = putdec(p, sig);
+    p = putstr(p, " pc="); p = put32(p, sc[18]); p = putstr(p, " lr="); p = put32(p, sc[17]);
+    p = putstr(p, " sp="); p = put32(p, sc[16]); p = putstr(p, " addr="); p = put32(p, sc[20]);
+    p = putstr(p, " r0="); p = put32(p, sc[3]); p = putstr(p, " r1="); p = put32(p, sc[4]);
+    *p++ = '\n'; emit(line, p - line); flush(1);
+    sc4(37, sc4(20, 0, 0, 0, 0), sig, 0, 0); /* handler was reset: dies with the same signal */
+}
+__attribute__((constructor)) static void init(void)
+{
+    static const int SIGS[] = {4, 6, 7, 8, 11};
+    u32 act[5] = {(u32)on_crash, 0x4 | 0x40000000 | 0x80000000u, 0, 0, 0}; /* SIGINFO|NODEFER|RESETHAND */
+    for (int i = 0; i < 5; i++) sc4(174, SIGS[i], (long)act, 0, 8);
+    note("START");
+    theme_init();
+    note(themed ? "THEME dark" : "THEME off");
+}
+__attribute__((destructor)) static void fini(void) { note("EXIT"); flush(1); }
+
+/* Settings page (screen 35): redraws the "Controlled by HASSOS" tick box state. */
+static void hassos_show(void)
+{
+    if (themed == 1) ((f_img)0xee58)(hassos_get() ? "images/Settings-HASSOS-checked.png" : "images/Maintenance.png");
+}
 
 static void hook(void)
 {
+    theme_init();
     if (BODY_TBL[SCR_MAINT] == BODY_MAINT) BODY_TBL[SCR_MAINT] = (u32)body_maint;
     if (ETR_TBL[SCR_MAINT] == ETR_MAINT) ETR_TBL[SCR_MAINT] = (u32)etr_maint;
 }
@@ -284,9 +462,131 @@ int ioctl(int fd, unsigned long req, long arg)
     }
     return (int)r;
 }
+/* Shell speed: creating /tmp/speed2 or /tmp/speed3 starts es-lcd's own timed speed (as the Home
+   fan key 0x66 does), so the screen shows it; removing the file goes back to speed 1. Only acts
+   when the files change, so the screen key keeps working. 0x708c0 is the countdown in minutes
+   (es-lcd sends req 0c/0d while it is non-zero), 0x708c2 the timer setting, 0x708ca the 0c/0d
+   selector. */
+#define BST_LEFT U16(0x708c0)
+#define BST_MINS U8(0x708c2)
+#define BST_SEL U8(0x708ca)
+static int shell_spd = 1;
+
+static void shell_speed(void)
+{
+    int spd = sc4(33, (long)"/tmp/speed3", 0, 0, 0) == 0 ? 3
+            : sc4(33, (long)"/tmp/speed2", 0, 0, 0) == 0 ? 2 : 1;
+    if (spd == shell_spd) return;
+    shell_spd = spd;
+    BST_SEL = spd == 3;
+    BST_LEFT = spd > 1 ? (BST_MINS ? BST_MINS : 20) : 0;
+}
+
+/* Logs every change of the speed countdown and selector, to see what the screen keys do. */
+static unsigned bst_last = 0xffffffff;
+
+static void log_bst(void)
+{
+    unsigned cur = BST_LEFT | BST_SEL << 16 | BST_MINS << 24;
+    if (cur == bst_last) return;
+    bst_last = cur;
+    char line[96], *p = line;
+    stamp(&p);
+    p = putstr(p, "BST left="); p = putdec(p, BST_LEFT);
+    p = putstr(p, " sel="); p = putdec(p, BST_SEL);
+    p = putstr(p, " mins="); p = putdec(p, BST_MINS);
+    *p++ = '\n';
+    emit(line, p - line);
+}
+
+/* Shell clock: /tmp/settime holding "HHMMDD" (e.g. 002024) is sent to the MSP430 the way the Set
+   time screen does (msp430lib_put_time: 02 00 MM HH DD ~xor), then deleted. Sent just before a
+   3-byte request so the i2c fd is pointed at the MSP430. */
+static void shell_time(void)
+{
+    char t[8];
+    long fd = sc4(5, (long)"/tmp/settime", 0, 0, 0);
+    if (fd < 0) return;
+    long n = sc4(3, fd, (long)t, 6, 0);
+    sc4(6, fd, 0, 0, 0);
+    sc4(10, (long)"/tmp/settime", 0, 0, 0);
+    if (n != 6) return;
+    for (int i = 0; i < 6; i++) if (t[i] < '0' || t[i] > '9') return;
+    unsigned char f[6] = {0x02, 0x00, (t[2] - '0') << 4 | (t[3] - '0'), (t[0] - '0') << 4 | (t[1] - '0'),
+                          (t[4] - '0') << 4 | (t[5] - '0'), 0};
+    f[5] = ~(f[1] ^ f[2] ^ f[3] ^ f[4]);
+    logdata("W", f, 6, sc4(4, i2cfd, (long)f, 6, 0));
+}
+
+/* HASSOS mode ("Controlled by HASSOS"): while /etc/hassos exists es-lcd only follows touches and
+   the shell files. es-lcd's own automations are its minute countdowns, which end a mode or a
+   timed speed without a touch: 0x1e320 summer bypass override, 0x1e322 holiday, 0x1e324 night,
+   0x1e31c summer bypass enable, 0x1e31e frost protection enable (8 h each) and 0x708c0 the speed
+   2/3 timer. byFsa takes 1 off each once per MSP430 minute; a drop of exactly 1 is put back, so a
+   mode or speed stays until a touch or a shell file changes it. The rising humidity bit (d0 0x40,
+   clear = on) is also forced off in the 0x20 frame and both checksums redone, so the MSP430 does
+   not go to speed 3 on its own. The flag is on the rootfs (/ is mounted rw, /etc is kept across
+   reboots and updates of es-lcd) and is re-read before each 3-byte request. */
+#define HASSOS_FLAG "/etc/hassos"
+static int hassos = -1;
+static const u32 HOLD[6] = {0x1e320, 0x1e322, 0x1e324, 0x1e31c, 0x1e31e, 0x708c0};
+static unsigned short held[6];
+static unsigned char held_sel;
+
+static void hassos_read(void) { hassos = sc4(33, (long)HASSOS_FLAG, 0, 0, 0) == 0; }
+
+/* For the Settings page: flips the flag, saves it, returns the new state. */
+int hassos_toggle(void)
+{
+    if (hassos_read(), hassos) sc4(10, (long)HASSOS_FLAG, 0, 0, 0);
+    else { /* O_WRONLY|O_CREAT|O_TRUNC */
+        long fd = sc4(5, (long)HASSOS_FLAG, 0x1 | 0x40 | 0x200, 0644, 0);
+        if (fd >= 0) { sc4(4, fd, (long)"1\n", 2, 0); sc4(6, fd, 0, 0, 0); }
+    }
+    sc4(36, 0, 0, 0, 0);
+    hassos_read();
+    return hassos;
+}
+int hassos_get(void) { if (hassos < 0) hassos_read(); return hassos; }
+
+/* restore=0 only takes a new snapshot (after the shell files have changed things). */
+static void hassos_hold(int restore)
+{
+    for (int i = 0; i < 6; i++) {
+        unsigned short v = U16(HOLD[i]);
+        if (restore && hassos == 1 && held[i] && v == held[i] - 1) {
+            U16(HOLD[i]) = v = held[i];
+            if (HOLD[i] == 0x708c0) BST_SEL = held_sel; /* byFsa clears it once the timer hits 0 */
+        }
+        held[i] = v;
+    }
+    held_sel = BST_SEL;
+}
+
+static const void *hassos_frame(const unsigned char *b, unsigned char *o)
+{
+    volatile unsigned char *v = o;
+    if (hassos != 1 || (b[1] & 0x40)) return b;
+    for (int i = 0; i < 13; i++) v[i] = b[i];
+    v[1] |= 0x40;
+    v[5] = ~(v[1] ^ v[2] ^ v[3] ^ v[4]);
+    unsigned char x = 0xff;
+    for (int i = 1; i < 12; i++) x ^= v[i];
+    v[12] = x;
+    return o;
+}
+
 long write(int fd, const void *buf, unsigned long n)
 {
     if (fd == i2cfd) {
+        unsigned char tmp[13];
+        if (hassos < 0 || n == 3) hassos_read();
+        hassos_hold(1);
+        shell_speed();
+        hassos_hold(0);
+        log_bst();
+        if (n == 3) shell_time();
+        if (n == 13 && ((const unsigned char *)buf)[0] == 0x20) buf = hassos_frame(buf, tmp);
         long r = fin(sc4(4, fd, (long)buf, n, 0));
         const unsigned char *b = buf;
         hook();
@@ -294,6 +594,12 @@ long write(int fd, const void *buf, unsigned long n)
         else if (n == 3) for (int i = 0; i < 3; i++) rq[i] = b[i];
         logdata("W", buf, n, r);
         return r;
+    }
+    if (fd == 1 || fd == 2) { /* es-lcd's messages (they go to /dev/null) */
+        char line[200], *p = line; const char *s = buf;
+        stamp(&p); p = putstr(p, fd == 1 ? "OUT " : "ERR ");
+        for (unsigned long i = 0; i < n && i < 150; i++) *p++ = s[i] >= ' ' && s[i] < 127 ? s[i] : '|';
+        *p++ = '\n'; emit(line, p - line);
     }
     return fin(sc4(4, fd, (long)buf, n, 0));
 }

@@ -18,6 +18,7 @@ Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-
 - [x] Settings frame decoded: setpoints, airflow % and mode flags.
 - [x] Bus cable wiring measured: red +10 V, blue 0 V, green RS485 A, yellow RS485 B (see [docs/protocol.md](docs/protocol.md#wiring-vsc-to-mrxbox-4-core-bus-cable)).
 - [x] Linux console found: the **LINUX TERMINAL** header next to the SD card (RS232 level, 115200 8N1). A card built with `mkimg.py --shell` gives a root login there; the ESP bridge makes it reachable over WiFi (see [captures/vsc_console_boot.txt](captures/vsc_console_boot.txt)).
+- [x] Custom screen theme (dark) and a **Controlled by HASSOS** tick box that hands control to Home Assistant, with the screen as a manual override (see [theme/README.md](theme/README.md)).
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
 - [ ] ESP acting as the controller (replacing the VSC).
@@ -50,6 +51,9 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 | `esp/vsc-serial-bridge/` | ESP32 WiFi bridge to the VSC's Linux console (browser + telnet) |
 | `logger/i2clog.c` | `LD_PRELOAD` library: logs every I²C exchange to `/i2clog.txt` and adds the debug pages |
 | `logger/build.sh` | Builds `i2clog.so` with `zig cc` (ARM926EJ-S, freestanding) |
+| `theme/README.md` | How the screen theme and HASSOS mode work, and how to make and install your own screens |
+| `theme/darken.py` | Makes a dark set from your card's own screen images |
+| `theme/overview.py` | Contact sheet of every screen in a folder, for checking a set |
 | `tools/mkimg.py` | Builds a logger SD image from a **copy** of a stock card dump |
 | `tools/getlog.py` | Extracts `/i2clog.txt` from a card image read back after a run |
 | `tools/armdis.py` | Annotated disassembly of `es-lcd` (pyelftools + capstone) |
@@ -136,4 +140,4 @@ Then follow [Using the logger image](#using-the-logger-image). To go back to sto
 
 ## Disclaimer
 
-Not affiliated with or endorsed by Nuaire. The card images contain Nuaire's firmware and are shared for interoperability research only. Flashing a modified card is at your own risk; always keep your original card.
+Not affiliated with or endorsed by Nuaire. This is interoperability research; no Nuaire firmware or artwork is published here. Flashing a modified card is at your own risk; always keep your original card.
