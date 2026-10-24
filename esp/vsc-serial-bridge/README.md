@@ -83,7 +83,13 @@ The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `l
      {% else %}Debug logging is off.{% endif %}
      ~~~
 
+     ![Debug log dashboard with the switch, the batch number and the log lines](../../docs/images/ha-mrxbox-debug-log.png)
+
    ![MRXBOX device in Home Assistant](../../docs/images/ha-mrxbox-device.png)
+
+   The airflow numbers and the Debug logging switch are under Configuration. The Activity list shows a new Debug log batch about every second while logging is on:
+
+   ![MRXBOX controls, airflow settings and debug logging](../../docs/images/ha-mrxbox-config.png)
 3. The bridge types shell lines on the console: a state poll every 20 s and the `/tmp` file commands. If it sees `login:` it logs in as root. Those lines show up in the console log and any telnet session. The poll waits while `/send` is in use (30 s after the last line), so it can't break into a typed upload.
 
 Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, `vsc/air_s1`…`vsc/air_s3`, `vsc/air_e1`…`vsc/air_e3`, `vsc/debug`, each with `/set` where HA can write; `vsc/log` carries the debug log, one line per message, and `vsc/log_batch` the same lines as JSON batches; `vsc/status` is online/offline).
