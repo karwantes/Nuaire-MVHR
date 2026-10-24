@@ -4,7 +4,7 @@
  * with the ESP bridge's MQTT entities (mrxbox_*). The integration registers this file,
  * so the card type is "custom:nuaire-mvhr-card" with no dashboard resource to add.
  */
-const VERSION = "0.2.3-alpha";
+const VERSION = "0.2.4-alpha";
 
 const COLORS = {
   intake: "#3fa9f5", supply: "#f5a623", extract: "#e35d4a", exhaust: "#6bb0d6",
@@ -300,7 +300,9 @@ class NuaireMvhrCard extends HTMLElement {
     t.hidden = !title;
     root.querySelector("ha-card").classList.toggle("fit", this._config.fit_height !== false);
     // Room kept free under the card for a fixed bar at the bottom of the screen (a kiosk nav bar, say).
-    this.style.setProperty("--nmc-bottom", `${Math.max(0, Number(this._config.bottom_offset) || 0)}px`);
+    // Plus a small gap, so the controls don't sit right on the bar.
+    const bottom = Math.max(0, Number(this._config.bottom_offset) || 0);
+    this.style.setProperty("--nmc-bottom", `${bottom ? bottom + 16 : 0}px`);
 
     const svg = root.querySelector("svg");
     const stage = this._stage(lay);
@@ -325,8 +327,8 @@ class NuaireMvhrCard extends HTMLElement {
     const f = LAYOUTS[this._layoutName()].font;
     const chars = Math.floor(w / (f * 0.56));
     const attrs = entity ? `class="node click" data-entity="${esc(entity)}" tabindex="0" role="button"` : `class="node"`;
+    // One coloured outline; an extra accent bar on the edge read as a double line.
     let out = `<g ${attrs}><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="16" style="stroke:${tone}"/>`;
-    out += `<rect x="${x}" y="${y}" width="6" height="${h}" rx="3" style="fill:${tone}"/>`;
     let ty = y + f * 1.35;
     out += `<text x="${x + 18}" y="${ty}" class="ttl">${esc(fit(title, chars))}</text>`;
     if (big !== undefined) {
@@ -380,7 +382,8 @@ class NuaireMvhrCard extends HTMLElement {
     let s = "";
 
     // Ducts first, nodes on top.
-    s += this._duct("bypass", ducts.bypass, col("intake"), { active: run && byp.open, dur, gradTo: col("supply"), width: 10 });
+    // The bypass duct is only drawn while air goes that way; a faint idle loop looked like a stray line.
+    if (byp.open) s += this._duct("bypass", ducts.bypass, col("intake"), { active: run, dur, gradTo: col("supply"), width: 10 });
     s += this._duct("intake", ducts.intake, col("intake"), { active: run, dur });
     s += this._duct("fresh", ducts.fresh, col("intake"), { active: run && !byp.open, dur, gradTo: col("supply") });
     s += this._duct("supply", ducts.supply, col("supply"), { active: run, dur });
@@ -406,19 +409,16 @@ class NuaireMvhrCard extends HTMLElement {
     const effEnt = this._e("efficiency") || this._e("supply_temp");
     const sp = speed !== null ? `Speed ${speed}` : "Speed —";
     const sup = speed ? this._num(`supply_${speed}`) : null, ext = speed ? this._num(`extract_${speed}`) : null;
-    // Portrait has the two air paths through the middle of the box, so keep it short there.
+    const chars = Math.floor(cw / (f * 0.56));
+    // The short form is used whenever the long one doesn't fit the box.
+    const airLong = `Supply ${sup}% · Extract ${ext}%`;
     const air = sup === null || ext === null ? ""
-      : lay.w > lay.h ? `Supply ${sup}% · Extract ${ext}%` : `S ${sup}% · E ${ext}%`;
+      : airLong.length <= chars - 2 ? airLong : `S ${sup}% · E ${ext}%`;
     const mx = cx + cw / 2, my = cy + ch / 2;
     // The whole box is clickable; the lines inside keep their own targets.
     const coreEnt = eff !== null ? effEnt : this._e("running_speed") || this._e("fan_speed");
     s += `<g class="node${coreEnt ? " click" : ""}"${coreEnt ? ` data-entity="${esc(coreEnt)}" tabindex="0" role="button"` : ""}>`;
     s += `<rect x="${cx}" y="${cy}" width="${cw}" height="${ch}" rx="18" class="exch" style="stroke:${col("core")}"/>`;
-    for (let i = 1; i < 8; i++) {
-      const fx = cx + (cw * i) / 8;
-      s += `<line x1="${fx}" y1="${cy + 8}" x2="${fx}" y2="${cy + ch - 8}" class="fin"/>`;
-    }
-    const chars = Math.floor(cw / (f * 0.56));
     if (eff !== null) {
       s += `<g class="click" data-entity="${esc(effEnt)}" tabindex="0" role="button">
         <text x="${mx}" y="${my - f * 1.1}" class="ttl mid">Heat recovery</text>
@@ -606,10 +606,9 @@ const CSS = `
   svg { display: block; width: 100%; height: auto; overflow: visible;
     font-family: var(--ha-font-family-body, var(--paper-font-body1_-_font-family, sans-serif)); }
   /* The floor stops a short screen (phone on its side) squeezing the drawing to nothing; the page scrolls instead. */
-  ha-card.fit svg { max-height: max(320px, calc(100vh - var(--header-height, 56px) - var(--nmc-ctrl-h, 0px) - var(--nmc-bottom, 0px) - 64px)); }
+  ha-card.fit svg { max-height: max(320px, calc(100vh - var(--header-height, 56px) - var(--nmc-ctrl-h, 0px) - var(--nmc-bottom, 0px) - 88px)); }
   .node > rect:first-child { fill: var(--secondary-background-color, rgba(127,127,127,.08)); stroke-width: 2; }
   .exch { fill: var(--secondary-background-color, rgba(127,127,127,.08)); stroke-width: 3; }
-  .fin { stroke: var(--divider-color, rgba(127,127,127,.3)); stroke-width: 1.5; }
   .badge { fill: var(--card-background-color, #fff); stroke-width: 2.5; }
   text { fill: currentColor; font-size: calc(var(--f) * 1px); }
   .ttl { fill: var(--secondary-text-color); }
