@@ -78,6 +78,30 @@ If the VSC doesn't answer 3 polls in a row, the entities go unavailable and
 the console isn't at a root shell. Unlike the ESP bridge there is no debug log entity, no
 telnet and no file upload.
 
+## Dashboard card (alpha)
+
+The integration also loads a dashboard card, so there is no resource to add. Add a card
+and pick **Nuaire MVHR**, or use `type: custom:nuaire-mvhr-card`. Everything is set in the
+visual editor:
+
+- It finds the unit's entities by itself; you can pick others under **Unit entities**.
+- Extra sensors (supply and exhaust air temperature, heat recovery, house temperature,
+  humidity and target) are optional.
+- **Show coil** adds a heating/cooling coil after the MVHR, with its own sensors. It's off
+  by default.
+- Every box, value and chip opens its entity; the controls row sets fan speed, bypass,
+  bypass setpoint, night and holiday.
+- The layout switches to portrait below 720 px wide and scales up to 4K without overlaps.
+- **Space under the card for a fixed bottom bar** keeps the controls clear of a kiosk or
+  nav bar fixed to the bottom of the screen.
+
+It also works with the ESP bridge's MQTT entities, without this integration: copy
+`frontend/nuaire-mvhr-card.js` to `/config/www/` and add it as a dashboard resource
+(`/local/nuaire-mvhr-card.js`, JavaScript module).
+
+Alpha: tested on a dashboard with the bridge's entities; **requires further testing** on
+other setups.
+
 ## Tested
 
 - The parser and command lines, offline against real poll answers.
