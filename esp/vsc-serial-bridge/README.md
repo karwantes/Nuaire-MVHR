@@ -24,6 +24,25 @@ The header next to the SD card is silkscreened **LINUX TERMINAL** (0V, TX, RX; 0
 - On a WROVER module, GPIO16/17 are taken by PSRAM. Change `VSC_RX_PIN` / `VSC_TX_PIN` (for example to 25/26).
 - If you see nothing at all, TX and RX are probably swapped.
 
+### RS485 bus tap (optional, listen only)
+
+A second input listens to the bus between the VSC and the MRXBOX. Use a **3.3 V MAX3485** module (a 5 V MAX485 board can put 5 V on the ESP pin):
+
+| MAX3485 module | Connect to |
+|---|---|
+| VCC | ESP 3V3 |
+| GND | ESP GND **and** blue bus wire (0 V) |
+| A | green bus wire |
+| B | yellow bus wire |
+| RO (RXD) | ESP **GPIO25** |
+| DE and /RE | both to GND (receive only) |
+| DI (TXD) | not connected |
+
+- Remove the module's 120 Ω termination resistor (often marked 121 or R7): the bus is already terminated.
+- Tap in parallel with the VSC (wall box terminals or the bus pads on the VSC back). The VSC keeps working.
+- If frames look like garbage, swap green and yellow. It does no harm.
+- **Never the red wire (+10 V).**
+
 ## Setup
 
 1. Arduino IDE with the ESP32 board package (Espressif `esp32`). Board: "ESP32 Dev Module".
@@ -36,8 +55,25 @@ The header next to the SD card is silkscreened **LINUX TERMINAL** (0V, TX, RX; 0
 - **Browser:** `http://vsc-bridge.local/` (or the IP). You get the live log (last 16 KB), a line to send commands, Ctrl-C and Enter buttons, a baud rate selector, a **TX on/off** switch and the **RS232 (inverted) / TTL (normal)** polarity switch, which is saved across reboots. With TX off, the bridge only listens and nothing reaches the VSC. TX goes back to on after the ESP restarts.
 - **Telnet:** PuTTY, connection type **Raw**, host `vsc-bridge.local`, port 23. One client at a time.
 - **Plain log:** `http://vsc-bridge.local/log`. **Status JSON:** `/status`.
+- **RS485 bus:** `http://vsc-bridge.local/bus`, or raw TCP port **2323** (read only). One line per frame: seconds since the ESP booted, ms since the previous frame, then the bytes in hex. A frame ends after 20 ms of silence. The default is 1200 baud with bits shown **MSB first**, because the bus sends bytes MSB first and a UART receives them bit-reversed (from the HA forum capture). Both settings are on the page and saved across reboots. Plain text at `/buslog`.
 
 The default is 115200 8N1, the usual DM355 console speed. If the log shows garbage, try other rates from the dropdown.
+
+## Home Assistant (MQTT)
+
+The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `logger/i2clog.so` on the VSC (the `/tmp` control files) and TX on.
+
+1. Open `http://vsc-bridge.local/mqtt` and enter the broker (for the Mosquitto add-on: the HA address, port 1883, and an HA user or Mosquitto login). The login is saved on the ESP only. Leave the host empty to turn MQTT off.
+2. A device **MRXBOX** appears with:
+   - **Fan speed** (select 1/2/3)
+   - **Bypass** (select Auto/On/Off)
+   - **Bypass setpoint** (15–30 °C). The unit can't report it, so HA shows the last value sent. A VSC restart goes back to the stored value.
+   - **Bypass active** (the unit's decision, `/tmp/bypass_state`)
+
+   ![MRXBOX device in Home Assistant](../../docs/images/ha-mrxbox-device.png)
+3. The bridge types shell lines on the console: a state poll every 20 s and the `/tmp` file commands. If it sees `login:` it logs in as root. Those lines show up in the console log and any telnet session.
+
+Topics are under `vsc/` (`vsc/speed`, `vsc/bypass`, `vsc/bypass_temp`, `vsc/bypass_state`, each with `/set` where HA can write; `vsc/status` is online/offline).
 
 ## Things to know
 

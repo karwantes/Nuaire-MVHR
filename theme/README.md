@@ -126,7 +126,7 @@ The tick box only appears with a theme installed (`images/.dark`), because the s
 |---|---|
 | Ends speed 2/3 when its timer runs out | Speed 2/3 stays until a touch or HA changes it |
 | Ends night, holiday and summer bypass override after their timers | They stay on until a touch or HA turns them off |
-| Ends summer bypass enable and frost protection enable after 8 h | They stay until changed |
+| Ends the Commissioning bypass "disable" (forced heat recovery) and frost protection timers after 8 h | They stay until changed |
 | Goes to speed 3 by itself on rising humidity | Rising humidity is turned off in the settings frame, so it doesn't |
 
 ### What does not change
@@ -145,5 +145,12 @@ For now, HA uses small files on the unit (through the ESP serial bridge in `esp/
 | `touch /tmp/speed3` | Speed 3 (wins over speed 2) |
 | `rm /tmp/speed2 /tmp/speed3` | Back to speed 1 |
 | `echo HHMMDD > /tmp/settime` | Sets the clock (e.g. `143024` = 14:30 on the 24th), then deletes itself |
+| `touch /tmp/bypass_on` | Bypass ON: damper open, air skips the heat exchanger (wins over `bypass_off`) |
+| `touch /tmp/bypass_off` | Bypass OFF: damper closed, heat recovery |
+| `rm /tmp/bypass_on /tmp/bypass_off` | Auto: the unit decides from the setpoint |
+| `echo 24 > /tmp/bypasstemp` | Sets the bypass setpoint (15–30 °C), then deletes itself. Not saved, so a restart goes back to the stored value |
+| `cat /tmp/bypass_state` | `1` = the unit has bypass ON, `0` = heat recovery. Updated when it changes |
 
-These work with the tick box off too. Without HASSOS mode, es-lcd's speed timer ends speed 2/3 as normal.
+These work with the tick box off too. Without HASSOS mode, es-lcd's timers end speed 2/3 as normal, and bypass on/off after 12 h / 8 h.
+
+`/tmp/bypass_state` is the unit's own decision (p9 0x08), not a switch on the damper. The damper has a wax actuator and follows over about a minute.

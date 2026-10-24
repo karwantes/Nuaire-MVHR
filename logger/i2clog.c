@@ -245,7 +245,8 @@ static void draw(void)
     p = putstr(p, " Nite"); *p++ = '0' + !(d[0] & 0x10); p = putstr(p, " Hol"); *p++ = '0' + !(d[0] & 0x20);
     p = putstr(p, " b3:"); *p++ = '0' + !(d[0] & 8); p = putstr(p, " b2:"); *p++ = '0' + !(d[0] & 4); line(12, p, b, 0xff);
     p = putstr(b, "Bypass "); p = putdec(p, d[1] >> 2); p = putstr(p, "C Hum "); p = putdec(p, d[2] >> 1);
-    p = putstr(p, "% Frost "); p = putdec(p, d[3] >> 4); line(13, p, b, 0xff);
+    p = putstr(p, "% Frost "); p = putdec(p, d[3] >> 4);
+    p = putstr(p, (q[9] & 0x08) ? "  BYP ON" : "  BYP off"); line(13, p, b, 0xff);
     p = putstr(b, "Air%");
     for (int i = 5; i < 11; i++) { *p++ = ' '; p = putdec(p, d[i] >> 1); }
     line(14, p, b, 0xff);
@@ -518,6 +519,58 @@ static void shell_time(void)
     logdata("W", f, 6, sc4(4, i2cfd, (long)f, 6, 0));
 }
 
+/* Shell bypass: /tmp/bypass_on forces bypass ON (air skips the heat exchanger) by running the User
+   Options override timer 0x1e320; /tmp/bypass_off forces heat recovery by running the Commissioning
+   "disable" timer 0x1e31c; with neither file the unit decides from the setpoint (bypass_on wins if
+   both exist). byFsa turns a running 0x1e320 into d0 0x80 clear and 0x1e31c into d0 0x08 clear. Like
+   the speed files it only acts when the files change, so the screen keys keep working. Outside
+   HASSOS mode the timers still run out (12 h and 8 h). /tmp/bypasstemp holding "NN" (15-30 °C) sets
+   the setpoint (S0 bits 10-15, sent as d1) and is then deleted. It is not saved to the card, so a
+   restart goes back to the stored setpoint. */
+#define BYP_OVR U16(0x1e320)
+#define BYP_DIS U16(0x1e31c)
+#define S0_D1 U8(0x6ab71)
+static int shell_byp;
+
+static void shell_bypass(void)
+{
+    int m = sc4(33, (long)"/tmp/bypass_on", 0, 0, 0) == 0 ? 1
+          : sc4(33, (long)"/tmp/bypass_off", 0, 0, 0) == 0 ? 2 : 0;
+    if (m != shell_byp) {
+        shell_byp = m;
+        BYP_OVR = m == 1 ? 720 : 0;
+        BYP_DIS = m == 2 ? 480 : 0;
+    }
+    char t[4];
+    long fd = sc4(5, (long)"/tmp/bypasstemp", 0, 0, 0);
+    if (fd < 0) return;
+    long n = sc4(3, fd, (long)t, 2, 0);
+    sc4(6, fd, 0, 0, 0);
+    sc4(10, (long)"/tmp/bypasstemp", 0, 0, 0);
+    if (n != 2 || t[0] < '0' || t[0] > '9' || t[1] < '0' || t[1] > '9') return;
+    int c = (t[0] - '0') * 10 + t[1] - '0';
+    if (c >= 15 && c <= 30) S0_D1 = (S0_D1 & 3) | c << 2;
+}
+
+/* Bypass status for the shell: p9 0x08 set = the unit has the bypass ON. Written to /tmp/bypass_state
+   ("1" or "0") only when it changes, from replies with a good checksum and working comms. It is the
+   unit's own decision; the damper itself (wax actuator) follows over about a minute. */
+static int byp_state = -1;
+
+static void bypass_state(const unsigned char *q)
+{
+    unsigned char x = 0xff;
+    for (int i = 7; i < 15; i++) x ^= q[i];
+    if (x != q[15] || (q[8] == 0xff && q[9] == 0xff)) return;
+    int s = (q[9] & 0x08) != 0;
+    if (s == byp_state) return;
+    byp_state = s;
+    long fd = sc4(5, (long)"/tmp/bypass_state", 0x1 | 0x40 | 0x200, 0644, 0); /* O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd >= 0) { sc4(4, fd, (long)(s ? "1\n" : "0\n"), 2, 0); sc4(6, fd, 0, 0, 0); }
+    char line[48], *p = line;
+    stamp(&p); p = putstr(p, s ? "BYPASS on\n" : "BYPASS off\n"); emit(line, p - line);
+}
+
 /* HASSOS mode ("Controlled by HASSOS"): while /etc/hassos exists es-lcd only follows touches and
    the shell files. es-lcd's own automations are its minute countdowns, which end a mode or a
    timed speed without a touch: 0x1e320 summer bypass override, 0x1e322 holiday, 0x1e324 night,
@@ -583,6 +636,7 @@ long write(int fd, const void *buf, unsigned long n)
         if (hassos < 0 || n == 3) hassos_read();
         hassos_hold(1);
         shell_speed();
+        shell_bypass();
         hassos_hold(0);
         log_bst();
         if (n == 3) shell_time();
@@ -611,6 +665,7 @@ long read(int fd, void *buf, unsigned long n)
         if (r == 28) {
             for (int i = 0; i < 28; i++) rx[i] = ((unsigned char *)buf)[i];
             nrx++; t_rx = nowsec();
+            bypass_state(rx + 8);
             for (int k = 0; k < 3; k++)
                 if (rq[1] == REQS[k]) { /* volatile keeps the compiler from emitting a memcpy import */
                     volatile unsigned char *o = rxk[k];

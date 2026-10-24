@@ -5,18 +5,30 @@
 //   http://<host>/log           - last 16 KB of console output as plain text
 //   http://<host>/status        - JSON: uptime, RSSI, baud, byte counters
 //   ArduinoOTA                  - reflash over WiFi once it is installed
+//   http://<host>/bus           - RS485 bus listener: one line per frame, hex
+//   http://<host>/buslog        - last 16 KB of bus frames as plain text
+//   telnet / raw TCP  port 2323 - the same bus frames, live (read only)
 //
 // Wiring: the VSC console is RS232 level, so go through a MAX3232 module
 // (or at least a 10k series resistor on RX), never the red bus wire:
 //   ESP RX (VSC_RX_PIN) <- VSC TX
 //   ESP TX (VSC_TX_PIN) -> VSC RX
 //   ESP GND             -  VSC 0V
+// RS485 tap, listen only, through a 3.3 V MAX3485 module (termination removed):
+//   module A <- green, B <- yellow, GND <- blue and ESP GND, never red
+//   module RO -> ESP BUS_RX_PIN, DE and /RE tied to GND, DI unconnected
+//
+// MQTT (optional, broker set at http://<host>/mqtt): Home Assistant discovery for
+// fan speed 1/2/3, bypass auto/on/off, bypass setpoint and bypass state. It works
+// through the /tmp control files of logger/i2clog.so, by typing shell lines on the
+// console, so the console must be logged in (the bridge answers "login:" with root).
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include "driver/uart.h"
+#include "mqtt_client.h"
 
 // WiFi credentials are not in the code: on first boot (or if the saved network
 // can't be joined) the ESP starts access point HOSTNAME / AP_PASS, and
@@ -32,6 +44,13 @@
 #define TELNET_PORT 23
 #define LOG_SIZE    16384
 
+// RS485 bus listener (receive only, no TX pin is assigned).
+#define BUS_RX_PIN  25
+#define BUS_BAUD    1200
+#define BUS_PORT    2323
+#define BUS_GAP_MS  20      // 1200 baud is 8.3 ms per byte; a longer silence ends a frame
+#define BUS_FRAME   64
+
 static uint32_t baud = DEFAULT_BAUD;
 static bool txEnabled = true;       // false = listen only, nothing reaches the VSC
 // The VSC "LINUX TERMINAL" header is RS232 level (idle about -5 V), so its
@@ -39,29 +58,100 @@ static bool txEnabled = true;       // false = listen only, nothing reaches the 
 static bool inverted = true;
 static uint32_t rxBytes = 0, txBytes = 0;
 
-static char logbuf[LOG_SIZE];
-static size_t logHead = 0;
-static bool logFull = false;
+static uint32_t busBaud = BUS_BAUD;
+// The bus sends bytes MSB first, so a UART sees them bit-reversed (per the HA
+// forum capture). With busRev on, frames are shown in the bus's own bit order.
+static bool busRev = true;
+static volatile uint32_t busBytes = 0, busFrames = 0, busDropped = 0;
+
+struct Ring {
+  char buf[LOG_SIZE];
+  size_t head = 0;
+  bool full = false;
+};
+static Ring conLog, busLog;
+
+struct BusFrame {
+  uint32_t t;
+  uint8_t len;
+  uint8_t d[BUS_FRAME];
+};
+static QueueHandle_t busQueue;
 
 WiFiServer telnet(TELNET_PORT);
 WiFiClient client;
+WiFiServer busServer(BUS_PORT);
+WiFiClient busClient;
 WebServer web(80);
 Preferences prefs;
 
-static void logPut(const uint8_t *d, size_t n) {
+static void ringPut(Ring &r, const uint8_t *d, size_t n) {
   for (size_t i = 0; i < n; i++) {
-    logbuf[logHead++] = (char)d[i];
-    if (logHead == LOG_SIZE) { logHead = 0; logFull = true; }
+    r.buf[r.head++] = (char)d[i];
+    if (r.head == LOG_SIZE) { r.head = 0; r.full = true; }
   }
 }
 
-static String logText() {
+static String ringText(const Ring &r) {
   String s;
   s.reserve(LOG_SIZE + 1);
-  if (logFull)
-    for (size_t i = logHead; i < LOG_SIZE; i++) s += logbuf[i];
-  for (size_t i = 0; i < logHead; i++) s += logbuf[i];
+  if (r.full)
+    for (size_t i = r.head; i < LOG_SIZE; i++) s += r.buf[i];
+  for (size_t i = 0; i < r.head; i++) s += r.buf[i];
   return s;
+}
+
+static uint8_t rev8(uint8_t b) {
+  b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+  b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+  return (b & 0xAA) >> 1 | (b & 0x55) << 1;
+}
+
+// Runs in its own task so frame gaps are timed even while the web server is
+// busy sending a log. Complete frames go to loop() through busQueue.
+static void busTask(void *) {
+  BusFrame f;
+  f.len = 0;
+  uint32_t last = 0;
+  for (;;) {
+    int c = Serial1.read();
+    uint32_t now = millis();
+    if (c < 0) {
+      if (f.len && now - last > BUS_GAP_MS) {
+        if (xQueueSend(busQueue, &f, 0) != pdTRUE) busDropped++;
+        busFrames++;
+        f.len = 0;
+      }
+      vTaskDelay(1);
+      continue;
+    }
+    if (f.len == BUS_FRAME) {
+      if (xQueueSend(busQueue, &f, 0) != pdTRUE) busDropped++;
+      busFrames++;
+      f.len = 0;
+    }
+    if (!f.len) f.t = now;
+    f.d[f.len++] = busRev ? rev8((uint8_t)c) : (uint8_t)c;
+    last = now;
+    busBytes++;
+  }
+}
+
+// "  12.345  +700  3B C2 54 06": seconds since boot, ms since the previous frame, bytes
+static void busDrain() {
+  static uint32_t prevT = 0;
+  BusFrame f;
+  while (xQueueReceive(busQueue, &f, 0) == pdTRUE) {
+    char line[32 + 3 * BUS_FRAME];
+    int p = snprintf(line, sizeof line, "%6lu.%03lu %+6ld ",
+                     (unsigned long)(f.t / 1000), (unsigned long)(f.t % 1000),
+                     prevT ? (long)(f.t - prevT) : 0L);
+    prevT = f.t;
+    for (int i = 0; i < f.len; i++) p += snprintf(line + p, sizeof line - p, " %02X", f.d[i]);
+    line[p++] = '\n';
+    ringPut(busLog, (const uint8_t *)line, p);
+    if (busClient && busClient.connected()) busClient.write((const uint8_t *)line, p);
+  }
 }
 
 static void applyInvert() {
@@ -73,6 +163,198 @@ static void vscWrite(const uint8_t *d, size_t n) {
   Serial2.write(d, n);
   txBytes += n;
 }
+
+// ---- MQTT / Home Assistant ----
+#define MQ_BASE     "vsc"
+#define MQ_POLL_MS  20000
+
+struct MqMsg {
+  char topic[40];
+  char data[16];
+};
+static esp_mqtt_client_handle_t mq = nullptr;
+static QueueHandle_t mqQueue;
+static volatile bool mqConnected = false, mqAnnounce = false;
+static String mqHost;
+static uint32_t mqLastPoll = 0;
+static int mqBypassTemp = 0;    // last setpoint sent; the unit can't report it
+
+// One console line that reports the state. "@""S" so the echoed command line
+// doesn't look like the answer.
+#define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off 2>/dev/null)"
+
+static void mqPub(const char *topic, const char *payload, bool retain = true) {
+  if (mq && mqConnected) esp_mqtt_client_publish(mq, topic, payload, 0, 0, retain);
+}
+
+static void vscLine(const String &s) {
+  vscWrite((const uint8_t *)s.c_str(), s.length());
+  const uint8_t cr = '\r';
+  vscWrite(&cr, 1);
+}
+
+static void mqEvent(void *, esp_event_base_t, int32_t id, void *data) {
+  esp_mqtt_event_handle_t e = (esp_mqtt_event_handle_t)data;
+  if (id == MQTT_EVENT_CONNECTED) {
+    mqConnected = true;
+    mqAnnounce = true;
+    esp_mqtt_client_subscribe(mq, MQ_BASE "/+/set", 0);
+    esp_mqtt_client_subscribe(mq, "homeassistant/status", 0);
+  } else if (id == MQTT_EVENT_DISCONNECTED) {
+    mqConnected = false;
+  } else if (id == MQTT_EVENT_DATA && e->topic_len) {
+    MqMsg m;
+    snprintf(m.topic, sizeof m.topic, "%.*s", e->topic_len, e->topic);
+    snprintf(m.data, sizeof m.data, "%.*s", e->data_len, e->data);
+    xQueueSend(mqQueue, &m, 0);
+  }
+}
+
+static void mqDiscovery(const char *comp, const char *key, const char *name, const char *extra) {
+  char topic[80], j[640];
+  snprintf(topic, sizeof topic, "homeassistant/%s/vsc_bridge/%s/config", comp, key);
+  snprintf(j, sizeof j,
+           "{\"name\":\"%s\",\"uniq_id\":\"vsc_bridge_%s\",\"obj_id\":\"mrxbox_%s\","
+           "\"avty_t\":\"" MQ_BASE "/status\",%s,"
+           "\"dev\":{\"ids\":[\"vsc_bridge\"],\"name\":\"MRXBOX\",\"mf\":\"Nuaire\",\"mdl\":\"MRXBOX VSC\"}}",
+           name, key, key, extra);
+  mqPub(topic, j);
+}
+
+static void mqAnnounceAll() {
+  mqDiscovery("select", "speed", "Fan speed",
+              "\"stat_t\":\"" MQ_BASE "/speed\",\"cmd_t\":\"" MQ_BASE "/speed/set\",\"options\":[\"1\",\"2\",\"3\"],\"ic\":\"mdi:fan\"");
+  mqDiscovery("select", "bypass", "Bypass",
+              "\"stat_t\":\"" MQ_BASE "/bypass\",\"cmd_t\":\"" MQ_BASE "/bypass/set\",\"options\":[\"Auto\",\"On\",\"Off\"],\"ic\":\"mdi:valve\"");
+  mqDiscovery("number", "bypass_temp", "Bypass setpoint",
+              "\"stat_t\":\"" MQ_BASE "/bypass_temp\",\"cmd_t\":\"" MQ_BASE "/bypass_temp/set\",\"min\":15,\"max\":30,\"step\":1,"
+              "\"unit_of_meas\":\"°C\",\"mode\":\"box\",\"ic\":\"mdi:thermometer\"");
+  mqDiscovery("binary_sensor", "bypass_state", "Bypass active",
+              "\"stat_t\":\"" MQ_BASE "/bypass_state\",\"ic\":\"mdi:valve-open\"");
+  mqPub(MQ_BASE "/status", "online");
+  if (mqBypassTemp) mqPub(MQ_BASE "/bypass_temp", String(mqBypassTemp).c_str());
+  mqLastPoll = 0;   // poll now
+}
+
+// A command from HA: type the shell line, then poll so HA sees the result.
+static void mqHandle(const char *topic, const char *data) {
+  String t = topic, d = data;
+  if (t == "homeassistant/status") {
+    if (d == "online") mqAnnounce = true;
+    return;
+  }
+  String cmd;
+  if (t == MQ_BASE "/speed/set") {
+    if (d == "1") cmd = "rm -f /tmp/speed2 /tmp/speed3";
+    else if (d == "2") cmd = "rm -f /tmp/speed3; touch /tmp/speed2";
+    else if (d == "3") cmd = "rm -f /tmp/speed2; touch /tmp/speed3";
+  } else if (t == MQ_BASE "/bypass/set") {
+    if (d == "Auto") cmd = "rm -f /tmp/bypass_on /tmp/bypass_off";
+    else if (d == "On") cmd = "rm -f /tmp/bypass_off; touch /tmp/bypass_on";
+    else if (d == "Off") cmd = "rm -f /tmp/bypass_on; touch /tmp/bypass_off";
+  } else if (t == MQ_BASE "/bypass_temp/set") {
+    int v = (int)d.toFloat();
+    if (v >= 15 && v <= 30) {
+      cmd = "echo " + String(v) + " > /tmp/bypasstemp";
+      mqBypassTemp = v;
+      mqPub(MQ_BASE "/bypass_temp", String(v).c_str());
+    }
+  }
+  if (!cmd.length()) return;
+  vscLine(cmd + "; " POLL_CMD);
+  mqLastPoll = millis();
+}
+
+// "@S 1 /tmp/speed2 /tmp/bypass_on" -> state topics
+static void mqParse(const char *line) {
+  const char *p = strstr(line, "@S");
+  if (!p || (p[2] != ' ' && p[2] != 0)) return;
+  p += 2;
+  bool s2 = strstr(p, "/tmp/speed2"), s3 = strstr(p, "/tmp/speed3");
+  bool bon = strstr(p, "/tmp/bypass_on"), boff = strstr(p, "/tmp/bypass_off");
+  while (*p == ' ') p++;
+  mqPub(MQ_BASE "/speed", s3 ? "3" : s2 ? "2" : "1");
+  mqPub(MQ_BASE "/bypass", bon ? "On" : boff ? "Off" : "Auto");
+  if (*p == '0' || *p == '1') mqPub(MQ_BASE "/bypass_state", *p == '1' ? "ON" : "OFF");
+}
+
+// Console bytes: assemble lines for mqParse, and log in when "login:" shows up.
+static void mqConsole(const uint8_t *d, size_t n) {
+  static char line[160];
+  static size_t len = 0;
+  for (size_t i = 0; i < n; i++) {
+    char c = (char)d[i];
+    if (c == '\n' || c == '\r') {
+      line[len] = 0;
+      if (len) mqParse(line);
+      len = 0;
+      continue;
+    }
+    if (len < sizeof line - 1) line[len++] = c;
+    if (len >= 6 && !memcmp(line + len - 6, "login:", 6) && mq) {
+      vscLine("root");
+      mqLastPoll = millis() - MQ_POLL_MS + 3000;   // poll 3 s after logging in
+    }
+  }
+}
+
+static void setupMqtt() {
+  mqHost = prefs.getString("mqhost", "");
+  mqBypassTemp = prefs.getInt("mqbtemp", 0);
+  if (!mqHost.length() || WiFi.status() != WL_CONNECTED) return;
+  static String user, pass;
+  user = prefs.getString("mquser", "");
+  pass = prefs.getString("mqpass", "");
+  mqQueue = xQueueCreate(8, sizeof(MqMsg));
+  esp_mqtt_client_config_t c = {};
+  c.broker.address.hostname = mqHost.c_str();
+  c.broker.address.port = prefs.getUInt("mqport", 1883);
+  c.broker.address.transport = MQTT_TRANSPORT_OVER_TCP;
+  c.credentials.client_id = HOSTNAME;
+  if (user.length()) c.credentials.username = user.c_str();
+  if (pass.length()) c.credentials.authentication.password = pass.c_str();
+  c.session.last_will.topic = MQ_BASE "/status";
+  c.session.last_will.msg = "offline";
+  c.session.last_will.retain = 1;
+  c.session.keepalive = 30;
+  mq = esp_mqtt_client_init(&c);
+  esp_mqtt_client_register_event(mq, MQTT_EVENT_ANY, mqEvent, nullptr);
+  esp_mqtt_client_start(mq);
+}
+
+static void mqLoop() {
+  if (!mq) return;
+  MqMsg m;
+  while (xQueueReceive(mqQueue, &m, 0) == pdTRUE) mqHandle(m.topic, m.data);
+  if (!mqConnected) return;
+  if (mqAnnounce) {
+    mqAnnounce = false;
+    mqAnnounceAll();
+  }
+  if (!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) {
+    mqLastPoll = millis();
+    vscLine(POLL_CMD);
+  }
+  static int savedTemp = 0;
+  if (mqBypassTemp != savedTemp) {
+    savedTemp = mqBypassTemp;
+    prefs.putInt("mqbtemp", mqBypassTemp);
+  }
+}
+
+static const char MQTT_PAGE[] PROGMEM = R"HTML(<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VSC bridge MQTT</title>
+<style>body{font-family:sans-serif;margin:16px;background:#111;color:#ddd}input,button{font-size:16px;margin:4px 0;width:100%;max-width:320px}</style>
+</head><body><h3>VSC bridge: MQTT broker</h3>
+<p>Home Assistant finds the MRXBOX by MQTT discovery. Leave the host empty to turn MQTT off.</p>
+<form method="POST" action="/mqtt">
+<input name="host" placeholder="broker host or IP" autocomplete="off"><br>
+<input name="port" placeholder="port (1883)" autocomplete="off"><br>
+<input name="user" placeholder="user" autocomplete="off"><br>
+<input name="pass" type="password" placeholder="password"><br>
+<button>Save and restart</button></form>
+<p><a href="/" style="color:#9cf">Back to console</a></p></body></html>)HTML";
 
 static const char PAGE[] PROGMEM = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -96,6 +378,7 @@ input,select,button{font-size:15px;margin:2px}
 <button onclick="post('/inv?on='+(inv?0:1))" id="invb">inv</button>
 <button onclick="post('/clear')">Clear log</button>
 <label><input type="checkbox" id="fol" checked>follow</label>
+<a href="/bus" style="color:#9cf">RS485 bus</a>
 <script>
 let tx=true,inv=true;
 const l=document.getElementById('l');
@@ -122,14 +405,54 @@ async function upd(){
 setInterval(upd,1000);upd();
 </script></body></html>)HTML";
 
+static const char BUS_PAGE[] PROGMEM = R"HTML(<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VSC bus</title>
+<style>
+body{font-family:sans-serif;margin:12px;background:#111;color:#ddd}
+pre{background:#000;color:#fd8;padding:8px;height:70vh;overflow:auto;white-space:pre;font-size:12px}
+select,button{font-size:15px;margin:2px}
+#st{font-size:12px;color:#aaa}
+</style></head><body>
+<div id="st">...</div>
+<pre id="l"></pre>
+<select id="b" onchange="post('/busbaud?b='+this.value)">
+<option>1200</option><option>2400</option><option>4800</option><option>9600</option><option>19200</option></select>
+<button onclick="post('/busrev?on='+(rev?0:1))" id="revb">rev</button>
+<button onclick="post('/busclear')">Clear</button>
+<label><input type="checkbox" id="fol" checked>follow</label>
+<a href="/" style="color:#9cf">Console</a>
+<script>
+let rev=true;
+const l=document.getElementById('l');
+function post(u){return fetch(u,{method:'POST'}).then(upd)}
+async function upd(){
+ try{
+  l.textContent=await (await fetch('/buslog')).text();
+  if(document.getElementById('fol').checked)l.scrollTop=l.scrollHeight;
+  const s=await (await fetch('/status')).json();
+  rev=s.bus_rev;
+  document.getElementById('revb').textContent=rev?'Bits: MSB first (reversed)':'Bits: as received';
+  document.getElementById('b').value=s.bus_baud;
+  document.getElementById('st').textContent=
+   `RS485 GPIO25  ${s.bus_baud} baud  bytes ${s.bus_bytes}  frames ${s.bus_frames}  dropped ${s.bus_dropped}  telnet 2323 ${s.bus_telnet?'connected':'free'}  |  time  +ms since previous frame  bytes`;
+ }catch(e){}
+}
+setInterval(upd,1000);upd();
+</script></body></html>)HTML";
+
 static void handleStatus() {
-  char j[200];
+  char j[360];
   snprintf(j, sizeof j,
-           "{\"uptime\":%lu,\"rssi\":%d,\"baud\":%lu,\"tx\":%s,\"inv\":%s,\"rx\":%lu,\"tx_bytes\":%lu,\"telnet\":%s}",
+           "{\"uptime\":%lu,\"rssi\":%d,\"baud\":%lu,\"tx\":%s,\"inv\":%s,\"rx\":%lu,\"tx_bytes\":%lu,\"telnet\":%s,"
+           "\"bus_baud\":%lu,\"bus_rev\":%s,\"bus_bytes\":%lu,\"bus_frames\":%lu,\"bus_dropped\":%lu,\"bus_telnet\":%s}",
            (unsigned long)(millis() / 1000), WiFi.RSSI(), (unsigned long)baud,
            txEnabled ? "true" : "false", inverted ? "true" : "false",
            (unsigned long)rxBytes, (unsigned long)txBytes,
-           (client && client.connected()) ? "true" : "false");
+           (client && client.connected()) ? "true" : "false",
+           (unsigned long)busBaud, busRev ? "true" : "false",
+           (unsigned long)busBytes, (unsigned long)busFrames, (unsigned long)busDropped,
+           (busClient && busClient.connected()) ? "true" : "false");
   web.send(200, "application/json", j);
 }
 
@@ -154,13 +477,41 @@ static void setupWeb() {
     delay(500);
     ESP.restart();
   });
-  web.on("/log", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", logText()); });
+  web.on("/mqtt", HTTP_GET, [] { web.send_P(200, "text/html", MQTT_PAGE); });
+  web.on("/mqtt", HTTP_POST, [] {
+    prefs.putString("mqhost", web.arg("host"));
+    prefs.putUInt("mqport", web.arg("port").length() ? web.arg("port").toInt() : 1883);
+    prefs.putString("mquser", web.arg("user"));
+    prefs.putString("mqpass", web.arg("pass"));
+    web.send(200, "text/plain", "Saved. Restarting...");
+    delay(500);
+    ESP.restart();
+  });
+  web.on("/log", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", ringText(conLog)); });
+  web.on("/bus", HTTP_GET, [] { web.send_P(200, "text/html", BUS_PAGE); });
+  web.on("/buslog", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", ringText(busLog)); });
+  web.on("/busbaud", HTTP_POST, [] {
+    uint32_t b = web.arg("b").toInt();
+    if (b >= 300 && b <= 115200) {
+      busBaud = b;
+      prefs.putUInt("busbaud", busBaud);
+      Serial1.updateBaudRate(busBaud);
+    }
+    web.send(200, "text/plain", "ok");
+  });
+  web.on("/busrev", HTTP_POST, [] {
+    busRev = web.arg("on") == "1";
+    prefs.putBool("busrev", busRev);
+    web.send(200, "text/plain", "ok");
+  });
+  web.on("/busclear", HTTP_POST, [] {
+    busLog.head = 0;
+    busLog.full = false;
+    web.send(200, "text/plain", "ok");
+  });
   web.on("/status", HTTP_GET, handleStatus);
   web.on("/send", HTTP_POST, [] {
-    String line = web.arg("line");
-    vscWrite((const uint8_t *)line.c_str(), line.length());
-    const uint8_t cr = '\r';
-    vscWrite(&cr, 1);
+    vscLine(web.arg("line"));
     web.send(200, "text/plain", "ok");
   });
   web.on("/ctrl", HTTP_POST, [] {
@@ -187,8 +538,8 @@ static void setupWeb() {
     web.send(200, "text/plain", "ok");
   });
   web.on("/clear", HTTP_POST, [] {
-    logHead = 0;
-    logFull = false;
+    conLog.head = 0;
+    conLog.full = false;
     web.send(200, "text/plain", "ok");
   });
   web.begin();
@@ -223,12 +574,23 @@ void setup() {
   inverted = prefs.getBool("inv", true);
   applyInvert();
 
+  busBaud = prefs.getUInt("busbaud", BUS_BAUD);
+  busRev = prefs.getBool("busrev", true);
+  Serial1.setRxBufferSize(1024);
+  Serial1.begin(busBaud, SERIAL_8N1, BUS_RX_PIN, -1);
+  gpio_pullup_en((gpio_num_t)BUS_RX_PIN);   // idle high while nothing is connected
+  busQueue = xQueueCreate(32, sizeof(BusFrame));
+  xTaskCreatePinnedToCore(busTask, "bus", 4096, nullptr, 2, nullptr, 0);
+
   setupWifi();
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.begin();
   setupWeb();
+  setupMqtt();
   telnet.begin();
   telnet.setNoDelay(true);
+  busServer.begin();
+  busServer.setNoDelay(true);
 }
 
 // Drop telnet option negotiation (IAC sequences) so it never reaches the console.
@@ -251,13 +613,29 @@ void loop() {
     }
   }
 
+  if (busServer.hasClient()) {
+    if (busClient && busClient.connected()) {
+      WiFiClient extra = busServer.available();
+      extra.print("busy: one bus client at a time\r\n");
+      extra.stop();
+    } else {
+      busClient = busServer.available();
+      busClient.setNoDelay(true);
+      busClient.printf("[vsc-bridge] RS485 GPIO%d, %lu baud, read only\r\n", BUS_RX_PIN, (unsigned long)busBaud);
+    }
+  }
+  while (busClient && busClient.connected() && busClient.available()) busClient.read();
+  busDrain();
+
   uint8_t buf[256];
   while (Serial2.available()) {
     size_t n = Serial2.readBytes(buf, min((size_t)Serial2.available(), sizeof buf));
-    logPut(buf, n);
+    ringPut(conLog, buf, n);
     rxBytes += n;
     if (client && client.connected()) client.write(buf, n);
+    mqConsole(buf, n);
   }
+  mqLoop();
 
   while (client && client.connected() && client.available()) {
     uint8_t c = (uint8_t)client.read();

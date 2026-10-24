@@ -23,7 +23,7 @@ Decoded from the `es-lcd` disassembly. `S0` means the 32-bit settings word at 0x
 |---|---|---|---|---|---|
 | 3 Humidity | RH boost setpoint | 50–85 % / 1 | 65 ("s" key) | S0 bits 17–23 | d2 >> 1 |
 | 30 Summer bypass setpoint | Bypass temperature | 15–30 °C / 1 | – | S0 bits 10–15 | d1 >> 2 |
-| 30 (key "s") | Bypass setpoint timer toggle | 0 or 480 | | 0x1e31c | (local) |
+| 30 (key "s") | Bypass "disable" timer (forces heat recovery) | 0 or 480 min | | 0x1e31c | d0 & 0x08 |
 | 21 Frost protection | Frost level | 0 to −5 / 1 | – | 0x708c4 (s16); S0 bits 28–31 = −value | d3 >> 4 |
 | 21 (key "s") | Frost timer toggle | 0 or 480 | | 0x1e31e | (local) |
 | 8 Air Flow Supply | 3 speeds | each 0–100 % / 1, speed1 ≤ speed2 | – | 0x1e2af / 0x1e2ae / 0x1e2ad | 0x708ac bytes 2 / 3 / 0, value << 1 |
@@ -38,6 +38,35 @@ When the bypass override starts, it clears d0 bit 7 (override on) and bit 0, and
 
 **Summer bypass setpoint** (for example "bypass 24C"): above this inside temperature the unit opens the summer bypass so fresh air skips the heat exchanger (free cooling), as long as it is cooler outside. It is the setpoint, not the live damper state.
 
+### Bypass control, tested live (MRXBOXAB-ECO4, inside 22 °C, outside 12 °C)
+
+**Which way round?** Think about where the air goes, not about the damper:
+
+| Words you might see | Damper | Air path | p9 0x08 | HX Bypass LED |
+|---|---|---|---|---|
+| **Bypass ON** (bypass open, "summer bypass") | Open | Skips the heat exchanger, so no heat recovery. Fresh outside air, for cooling. | 1 | Amber |
+| **Bypass OFF** (bypass closed, "heat recovery") | Closed | Goes through the heat exchanger, so heat is recovered. Normal winter running. | 0 | Off |
+
+Rule of thumb: an open bypass is an open shortcut around the heat exchanger. In this document "bypass" always means bypass ON, and "heat recovery" means bypass OFF.
+
+| Screen action | TX change | Unit (p9 bit 0x08) |
+|---|---|---|
+| Start: setpoint 24 °C, nothing else on | `20 fe 60 …` | 0, heat recovery |
+| Setpoint 24 → 15 °C | d1 `60` → `3c` | 1, bypass (first reply after) |
+| Commissioning bypass "disable" (key "s" on screen 30) | d0 `fe` → `f6` (0x08 clear) | 0, heat recovery within 1 s, setpoint still 15 |
+| Commissioning bypass enabled again | d0 `f6` → `fe` | 1, bypass |
+| User Options bypass override on (6 h) | d0 `fe` → `7e` (0x80 clear) | 1, bypass |
+| Setpoint back to 24 °C, override still on | d1 `3c` → `60` | 1, bypass (held a minute later) |
+
+So:
+- **d0 0x80 clear (bypass override) forces bypass**, whatever the setpoint.
+- **d0 0x08 clear (Commissioning "disable") forces heat recovery**, whatever the setpoint. The name of the 0x1e31c timer was a guess; this is what it does.
+- With both set, the unit decides from the d1 setpoint and its own temperatures.
+- **p9 0x08 = 1 means the unit is in bypass.** es-lcd never reads it. In the last state the unit's **HX Bypass** status LED was lit (top LED in Fig 21 of Nuaire I&M 671797).
+- **p9 0x08 is the unit's decision, not the damper's position.** It changed within about 1 s of the Commissioning disable and re-enable, but only 63 s after the override ended (the unit re-checking the setpoint once a minute). A wax actuator can't move in 1 s. No other byte from the unit tracks the bypass, so this is the best status available.
+- **How es-lcd builds the bits:** byFsa rebuilds d0 every pass from the timers. 0x1e31c running clears 0x08; 0x1e320 running clears 0x80 (after setting bits 4–6); 0x1e31e running clears 0x04. The timers count down once a minute, and HASSOS mode holds them.
+- **Shell control** (i2clog.so, see `theme/README.md`): `/tmp/bypass_on` runs 0x1e320 (720 min), `/tmp/bypass_off` runs 0x1e31c (480 min), neither = auto. `/tmp/bypasstemp` writes the setpoint into S0 (0x6ab71, sent as d1). `/tmp/bypass_state` holds p9 0x08 as `1`/`0`, from replies with a good checksum.
+
 ## I²C framing (MSP430 at 0x26)
 - **Write (TX):** `cmd, data[0..n-1], chk` where `chk = ~(data[0] ^ … ^ data[n-1])`. The settings frame is `cmd 0x20`, n = 11. A 100 µs pause follows.
 - **Read (RX):** write 3 bytes `00, req, ~req`, wait 100 µs, then read 28 bytes. The first 8 are skipped; bytes 8–27 become payload p0..p19.
@@ -48,7 +77,7 @@ When the bypass override starts, it clears d0 bit 7 (override on) and bit 0, and
 ## TX frame `20 d0..d10`
 | Byte | Meaning |
 |---|---|
-| d0 | Mode flags, all active low. 0x80 bypass override, 0x40 Rising Boost, 0x20 Holiday, 0x10 Night, 0x08 bypass-setpoint "s" timer running (0x1e31c), 0x04 frost "s" timer running (0x1e31e). Bit 0 is always cleared. |
+| d0 | Mode flags, all active low. 0x80 bypass override, 0x40 Rising Boost, 0x20 Holiday, 0x10 Night, 0x08 bypass "disable" timer running, forces heat recovery (0x1e31c), 0x04 frost "s" timer running (0x1e31e). Bit 0 is always cleared. |
 | d1 | Bypass setpoint << 2 |
 | d2 | Humidity setpoint << 1 |
 | d3 | (−frost level) << 4 |
@@ -96,6 +125,7 @@ The fan bars on Home are drawn coloured only when both 0x08 and 0x20 are set (bo
 | Bit | Meaning |
 |---|---|
 | 0x20 | "Frost fail" on the status line (lowest priority; otherwise "OK") |
+| 0x08 | **Set = HX bypass on** (not read by es-lcd; see [Bypass control](#bypass-control-tested-live-mrxboxab-eco4-inside-22-c-outside-12-c)) |
 | 0x04 | Clear → "Test routine required!", and 0x1e334 = 1. Also lights fan bar 3 |
 | 0x02 | With 0x04, lights fan bar 2: bar 2 is lit unless both bits are set |
 
@@ -183,6 +213,7 @@ How that lines up with the I²C fields above:
 His capture has no temperatures in the broadcast, the checksum is unknown, and replaying a boost message did not work. Lining up a simultaneous RS485 + I²C capture is the next step.
 
 ## Still open
+- **Later: real damper position.** p9 0x08 is the unit's decision, not the damper. Once the other reply bits are understood, look for one that lags p9 0x08 by about a minute (the wax actuator travelling), or capture the RS485 bus during a bypass change.
 - p7, p11: boost acknowledgement bits (see table); exact meaning of each bit still open. p10, p12 constant so far. Run 3: pressing speed 3 (boost) on Home sent req 0c and then 0d, which stayed for about 26 minutes (from 158 s to the end), with p11 at e8 throughout; p15 follows as the checksum (ab → 8b → 8d → 9d). p9 stayed f6 (the speed-1 pattern) the whole time, so the p9 speed bits don't reflect boost; the v5 debug page also shows "Spd 1" during boost. Use p7 bit 0x20 / p11 to detect boost.
 - Reply header bytes: zero in runs 1–2, but an echo of TX d1..d8 from run 3 on, identical for every req (see above).
 - p19 meaning (no reader in es-lcd). The RS485 bus capture posted on the HA forum shows a `3B C2 54 06` message whose byte 2 is also 0x54, so p19 likely mirrors that field.
