@@ -4,7 +4,7 @@
  * with the ESP bridge's MQTT entities (mrxbox_*). The integration registers this file,
  * so the card type is "custom:nuaire-mvhr-card" with no dashboard resource to add.
  */
-const VERSION = "0.2.4-alpha";
+const VERSION = "0.2.5-alpha";
 
 const COLORS = {
   intake: "#3fa9f5", supply: "#f5a623", extract: "#e35d4a", exhaust: "#6bb0d6",
@@ -69,22 +69,25 @@ function roundedPath(pts, r = 14) {
 // at any size: the whole stage scales as one picture.
 const LAYOUTS = {
   landscape: {
+    // Mirrored about the middle: outdoor boxes on the left, house (and coil) on the right,
+    // supply above the centre line and extract below it.
     w: 1120, h: 620, font: 19,
-    intake: [20, 40, 240, 120], exhaust: [20, 460, 240, 120],
-    core: [400, 200, 220, 220], coil: [655, 30, 215, 170], house: [900, 180, 200, 260],
-    badge: [430, 455, 160, 44],
+    intake: [20, 30, 240, 170], exhaust: [20, 420, 240, 170],
+    core: [450, 200, 220, 220], coil: [860, 30, 240, 170],
+    house: [860, 200, 240, 220], houseCoil: [860, 420, 240, 170],
+    badge: [480, 450, 160, 44],
     ducts: (coil) => ({
-      intake: [[260, 100], [330, 100], [330, 235], [400, 235]],
-      fresh: [[400, 235], [620, 235]],
-      supply: coil ? [[620, 235], [640, 235], [640, 105], [655, 105]] : [[620, 235], [900, 235]],
-      supply2: coil ? [[870, 105], [885, 105], [885, 235], [900, 235]] : null,
-      extract: [[900, 385], [620, 385]],
-      stale: [[620, 385], [400, 385]],
-      exhaust: [[400, 385], [330, 385], [330, 520], [260, 520]],
-      bypass: [[372, 235], [372, 160], [632, 160], [632, 235]],
+      intake: [[260, 115], [355, 115], [355, 235], [450, 235]],
+      fresh: [[450, 235], [670, 235]],
+      supply: coil ? [[670, 235], [765, 235], [765, 115], [860, 115]] : [[670, 235], [860, 235]],
+      supply2: coil ? [[980, 200], [980, 420]] : null,
+      extract: coil ? [[860, 505], [765, 505], [765, 385], [670, 385]] : [[860, 385], [670, 385]],
+      stale: [[670, 385], [450, 385]],
+      exhaust: [[450, 385], [355, 385], [355, 505], [260, 505]],
+      bypass: [[400, 235], [400, 160], [720, 160], [720, 235]],
     }),
-    supplyLabel: (coil) => coil ? [770, 222, "middle"] : [760, 222, "middle"],
-    extractLabel: [760, 418, "middle"],
+    supplyLabel: () => [765, 282, "middle"],
+    extractLabel: [765, 330, "middle"],
   },
   portrait: {
     w: 600, h: 1040, font: 22,
@@ -478,7 +481,8 @@ class NuaireMvhrCard extends HTMLElement {
     }
 
     // House
-    const [hx, hy, hw, hh] = lay.house;
+    const houseBox = (coil && lay.houseCoil) || lay.house;
+    const [hx, hy, hw, hh] = houseBox;
     const houseT = this._e("house_temp") ? "house_temp" : "extract_temp";
     const houseH = this._e("house_humidity") ? "house_humidity" : "humidity";
     const tgt = this._st("house_target");
@@ -494,7 +498,7 @@ class NuaireMvhrCard extends HTMLElement {
           <circle cx="${bxr + dx}" cy="${by2}" r="${f * 0.95}"/><text x="${bxr + dx}" y="${by2 + f * 0.36}" class="sub mid">${sign}</text></g>`;
       }
     }
-    s += this._node(lay.house, {
+    s += this._node(houseBox, {
       entity: this._e(houseT), tone: col("house"), title: "House",
       big: this._fmt(houseT), lines, extra,
     });
