@@ -1,7 +1,8 @@
 # Nuaire MVHR (VSC serial): Home Assistant custom integration
 
-**Experimental, requires further testing.** It has only been run against a simulated
-console, not on a real VSC yet.
+**Experimental, requires further testing.** It has been installed and run on a real Home
+Assistant against a simulated console, but not on a real VSC yet. That comes later on the
+roadmap.
 
 This runs the ESP bridge's console logic inside Home Assistant, for a USB serial dongle
 wired straight to the VSC's **LINUX TERMINAL** header, with no ESP:
@@ -35,8 +36,10 @@ Pin positions are in [docs/convert-card.md](../../docs/convert-card.md).
 
 ## Install
 
-1. Copy `custom_components/nuaire_mvhr` to `/config/custom_components/` on your HA. You
-   can also add this repo to HACS as a custom repository of type Integration.
+1. In HACS, open the menu, choose **Custom repositories**, add
+   `https://github.com/karwantes/Nuaire-MVHR` as type **Integration**, then download
+   **Nuaire MVHR (VSC serial)**. Or copy `custom_components/nuaire_mvhr` to
+   `/config/custom_components/` by hand.
 2. Restart Home Assistant.
 3. Go to **Settings > Devices & services > Add integration > Nuaire MVHR (VSC serial)**.
    Pick the dongle, or type a path. A `/dev/serial/by-id/...` path survives a reboot.
