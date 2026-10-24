@@ -81,7 +81,53 @@ Add `--shell` (`python tools/mkimg.py --shell stock.img my_shell.img`) to start 
 
 ## SD card images
 
-Card images contain Nuaire's firmware, so none are published. Image your own card (two partitions; the ext2 rootfs starts at sector 40960) and keep the original safe. For reference, the SHA-256 of my stock card was `91ad9632ced6ebd1cf56fd6e37cc6e4f9506c5b6c8cce0f3610c588556a555e9`.
+Card images contain Nuaire's firmware, so none are published. Make your own from the card in your VSC. Every step below only reads the original card; all changes go to copies.
+
+### 1. Copy your card to an image file
+
+1. Power the unit off at the isolator and take the SD card out of the VSC board.
+2. Lock the card: slide its write-protect tab down, so nothing can write to it by accident.
+3. Put it in a card reader on your PC.
+4. Read the whole card to a file called `stock.img`:
+   - **Windows:** install [Win32 Disk Imager](https://sourceforge.net/projects/win32diskimager/). Pick the card's drive letter, type a path ending in `stock.img`, leave **Read Only Allocated Partitions** unticked, and press **Read** (not Write). If Windows offers to format the card, press **Cancel**.
+   - **Linux:** find the card with `lsblk` (e.g. `/dev/sdb`), then `sudo dd if=/dev/sdb of=stock.img bs=1M status=progress`.
+5. Put the original card back in the VSC (unlock it first) and power the unit on. Keep `stock.img` safe as your backup.
+
+My card gave a 493,879,296-byte image with SHA-256 `91ad9632ced6ebd1cf56fd6e37cc6e4f9506c5b6c8cce0f3610c588556a555e9`. If yours matches, it is the same firmware build these notes were written against. Check it with `certutil -hashfile stock.img SHA256` (Windows) or `sha256sum stock.img` (Linux).
+
+### 2. Extract the second partition
+
+The card has two partitions; the second is the ext2 Linux root filesystem and starts at sector 40960. The tools need a copy of it in a folder called `rootfs_p2` in the repo root (git ignores it).
+
+- **Linux or WSL** (from the repo root):
+  ```sh
+  mkdir -p mnt rootfs_p2
+  sudo mount -o loop,ro,offset=$((40960*512)) stock.img mnt
+  sudo cp -a mnt/. rootfs_p2/ && sudo chown -R $USER rootfs_p2
+  sudo umount mnt
+  ```
+- **Windows only:** open `stock.img` in [7-Zip](https://www.7-zip.org/), open the second partition (the larger of the two partition files inside), and extract everything into `rootfs_p2`.
+
+### 3. Build the logger image
+
+From the repo root (needs Python 3 with Pillow, and [zig](https://ziglang.org/download/) for the library):
+
+```sh
+cd logger && ./build.sh && cd ..
+python tools/mklogo.py
+python tools/mkimg.py stock.img my_logger.img
+```
+
+`mklogo.py` makes `welcomepage_new.png` from your card's own welcome screen, so you can see the modified card booted. `mkimg.py` only reads `stock.img` and writes everything to `my_logger.img`.
+
+### 4. Write it to a spare card
+
+Use a **different** SD card of at least the same size, never your original.
+
+- **Windows:** in Win32 Disk Imager pick the spare card's drive letter, choose `my_logger.img` and press **Write**. Check the drive letter twice; it overwrites the whole card.
+- **Linux:** `sudo dd if=my_logger.img of=/dev/sdX bs=1M conv=fsync status=progress`, with `sdX` the spare card.
+
+Then follow [Using the logger image](#using-the-logger-image). To go back to stock, power off and put your original card back.
 
 ## Plan: an ESP instead of the VSC
 
