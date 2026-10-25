@@ -66,6 +66,15 @@ The rest of this page is the research behind it: how the VSC works, the logger i
 
 The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 
+## Control options
+
+| # | Setup | Control | Status |
+|---|---|---|---|
+| 1 | Linux serial console, logger card | Full: HA → console → shell files → `es-lcd` → bus chip → bus | Implemented |
+| 2 | I²C tap, stock card | Read only: the ESP listens to `es-lcd` and the bus chip | In progress |
+| 3 | I²C, logger card with **Controlled by HASSOS** ticked | Full: `es-lcd` goes quiet on I²C and the ESP talks to the bus chip itself; a screen press hands control back | In progress |
+| 4 | No VSC, ESP on RS485 | Full: the ESP answers the unit in the VSC's bus slots | In progress |
+
 ## How the VSC works
 
 ```
