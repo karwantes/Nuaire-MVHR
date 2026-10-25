@@ -4,6 +4,8 @@ A WiFi-to-serial bridge for the VSC's Linux console. Plug the ESP32 into the ser
 
 ## Wiring
 
+Tested on an ESP32 dev board ("ESP32 Dev Module" in Arduino): [the one I used](https://link.amazon/B0fLi8rTD).
+
 The header next to the SD card is silkscreened **LINUX TERMINAL** (0V, TX, RX; 0V is the pin nearest the blue sticker). TX/RX are named from the VSC's side.
 
 **It is RS232 level, not TTL.** TX idles at about -5 V (IC13 beside it is a MAX3232-type transceiver). Connected straight to an ESP pin you get steady garbage at 115200, and the negative voltage can damage the ESP. Use a MAX3232 RS232-to-TTL module in between:
@@ -32,16 +34,33 @@ A second input listens to the bus between the VSC and the MRXBOX. Use a **3.3 V 
 |---|---|
 | VCC | ESP 3V3 |
 | GND | ESP GND **and** blue bus wire (0 V) |
-| A | green bus wire |
-| B | yellow bus wire |
+| A | yellow bus wire (see the XY-485 note below) |
+| B | green bus wire |
 | RO (RXD) | ESP **GPIO25** |
 | DE and /RE | both to GND (receive only) |
 | DI (TXD) | not connected |
 
-- Remove the module's 120 Ω termination resistor (often marked 121 or R7): the bus is already terminated.
+**Tested on my unit: an XY-485 auto-direction module** ([the one I used](https://link.amazon/B0ftIGEMN)). It has no DE/RE pins. Go by the printed labels, not the colours of its cable:
+
+| XY-485 | Cable colour | Connect to |
+|---|---|---|
+| VCC | black | ESP **VIN** (5 V). The board's own 3.3 V regulator feeds the chip, so RXD stays at 3.3 V |
+| GND | yellow | ESP GND **and** blue bus wire (0 V) |
+| RXD | white | ESP **GPIO25** |
+| TXD | red | ESP **GPIO26**. The firmware holds it high from boot, which keeps the module in receive. Never leave it floating: a low TXD makes the module drive the bus |
+| A+ | | **yellow** bus wire |
+| B- | | **green** bus wire |
+| Earth | | not connected |
+
+![XY-485 front](../../docs/images/xy485_front.jpg) ![XY-485 back](../../docs/images/xy485_back.jpg)
+
+- On my unit the module only decoded with **A+ on yellow and B- on green**. With them the other way round, the RXD pin never moved at all. If you see no traffic, swap them (power off first).
+- The XY-485 measured about 22 kΩ across A+/B- (bias resistors, no termination), so nothing needs removing. On other modules, remove a 120 Ω termination resistor (often marked 121): the bus is already terminated.
+- The ground link (blue to module GND) is required. Without it the receiver sees nothing.
+- The chip on the XY-485 is a MAX485 (a 5 V part) run at 3.3 V by the board's regulator. It works on my unit, but a MAX3485 is the in-spec part.
 - Tap in parallel with the VSC (wall box terminals or the bus pads on the VSC back). The VSC keeps working.
-- If frames look like garbage, swap green and yellow. It does no harm.
 - **Never the red wire (+10 V).**
+- `/status` shows `bus_edges` and `bus_level`, which count level changes on GPIO25 at any baud rate. If edges stay at 0, the module isn't switching (check ground, then swap A/B).
 
 ## Setup
 

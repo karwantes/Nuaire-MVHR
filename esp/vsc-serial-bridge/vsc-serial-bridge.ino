@@ -15,8 +15,9 @@
 //   ESP TX (VSC_TX_PIN) -> VSC RX
 //   ESP GND             -  VSC 0V
 // RS485 tap, listen only, through a 3.3 V MAX3485 module (termination removed):
-//   module A <- green, B <- yellow, GND <- blue and ESP GND, never red
+//   module A <- yellow, B <- green (tested), GND <- blue and ESP GND, never red
 //   module RO -> ESP BUS_RX_PIN, DE and /RE tied to GND, DI unconnected
+//   or an auto-direction module (XY-485): RXD -> BUS_RX_PIN, TXD -> BUS_TX_PIN (held high)
 //
 // MQTT (optional, broker set at http://<host>/mqtt): Home Assistant discovery for
 // fan speed 1/2/3, bypass auto/on/off, bypass setpoint and bypass state. It works
@@ -45,8 +46,10 @@
 #define TELNET_PORT 23
 #define LOG_SIZE    16384
 
-// RS485 bus listener (receive only, no TX pin is assigned).
+// RS485 bus listener (receive only). BUS_TX_PIN is held high and never sends:
+// on an auto-direction module (XY-485) a high TXD keeps it in receive.
 #define BUS_RX_PIN  25
+#define BUS_TX_PIN  26
 #define BUS_BAUD    1200
 #define BUS_PORT    2323
 #define BUS_GAP_MS  20      // 1200 baud is 8.3 ms per byte; a longer silence ends a frame
@@ -64,6 +67,7 @@ static uint32_t busBaud = BUS_BAUD;
 // forum capture). With busRev on, frames are shown in the bus's own bit order.
 static bool busRev = true;
 static volatile uint32_t busBytes = 0, busFrames = 0, busDropped = 0;
+static volatile uint32_t busEdges = 0;   // level changes on BUS_RX_PIN, whatever the baud
 
 struct Ring {
   char buf[LOG_SIZE];
@@ -773,24 +777,26 @@ async function upd(){
   document.getElementById('revb').textContent=rev?'Bits: MSB first (reversed)':'Bits: as received';
   document.getElementById('b').value=s.bus_baud;
   document.getElementById('st').textContent=
-   `RS485 GPIO25  ${s.bus_baud} baud  bytes ${s.bus_bytes}  frames ${s.bus_frames}  dropped ${s.bus_dropped}  telnet 2323 ${s.bus_telnet?'connected':'free'}  |  time  +ms since previous frame  bytes`;
+   `RS485 GPIO25  ${s.bus_baud} baud  bytes ${s.bus_bytes}  frames ${s.bus_frames}  edges ${s.bus_edges}  pin ${s.bus_level?'high':'low'}  dropped ${s.bus_dropped}  telnet 2323 ${s.bus_telnet?'connected':'free'}  |  time  +ms since previous frame  bytes`;
  }catch(e){}
 }
 setInterval(upd,1000);upd();
 </script></body></html>)HTML";
 
 static void handleStatus() {
-  char j[360];
+  char j[420];
   snprintf(j, sizeof j,
            "{\"uptime\":%lu,\"rssi\":%d,\"baud\":%lu,\"tx\":%s,\"inv\":%s,\"rx\":%lu,\"tx_bytes\":%lu,\"telnet\":%s,"
-           "\"bus_baud\":%lu,\"bus_rev\":%s,\"bus_bytes\":%lu,\"bus_frames\":%lu,\"bus_dropped\":%lu,\"bus_telnet\":%s}",
+           "\"bus_baud\":%lu,\"bus_rev\":%s,\"bus_bytes\":%lu,\"bus_frames\":%lu,\"bus_dropped\":%lu,\"bus_telnet\":%s,"
+           "\"bus_edges\":%lu,\"bus_level\":%d}",
            (unsigned long)(millis() / 1000), WiFi.RSSI(), (unsigned long)baud,
            txEnabled ? "true" : "false", inverted ? "true" : "false",
            (unsigned long)rxBytes, (unsigned long)txBytes,
            (client && client.connected()) ? "true" : "false",
            (unsigned long)busBaud, busRev ? "true" : "false",
            (unsigned long)busBytes, (unsigned long)busFrames, (unsigned long)busDropped,
-           (busClient && busClient.connected()) ? "true" : "false");
+           (busClient && busClient.connected()) ? "true" : "false",
+           (unsigned long)busEdges, digitalRead(BUS_RX_PIN));
   web.send(200, "application/json", j);
 }
 
@@ -952,6 +958,8 @@ static void setupWifi() {
 }
 
 void setup() {
+  pinMode(BUS_TX_PIN, OUTPUT);       // first thing: keep an auto-direction module in receive
+  digitalWrite(BUS_TX_PIN, HIGH);
   Serial.begin(115200);
   prefs.begin("bridge", false);
   Serial2.setRxBufferSize(4096);
@@ -964,6 +972,7 @@ void setup() {
   Serial1.setRxBufferSize(1024);
   Serial1.begin(busBaud, SERIAL_8N1, BUS_RX_PIN, -1);
   gpio_pullup_en((gpio_num_t)BUS_RX_PIN);   // idle high while nothing is connected
+  attachInterrupt(BUS_RX_PIN, []() IRAM_ATTR { busEdges++; }, CHANGE);
   busQueue = xQueueCreate(32, sizeof(BusFrame));
   xTaskCreatePinnedToCore(busTask, "bus", 4096, nullptr, 2, nullptr, 0);
 

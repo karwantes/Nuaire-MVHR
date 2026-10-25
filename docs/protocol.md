@@ -169,7 +169,7 @@ The wall box has a colour label red / yellow / green / blue next to the cable en
 
 - Red probe on yellow, black on green reads slightly negative (under 0.5 V), so green idles higher and is A. The difference is small and the meter averages over traffic, and some vendors label A/B the other way round. If a tap decodes garbage or inverted bytes, swap green and yellow; it does no harm.
 - Blue → C71 "−" leg (board ground) should read ~0 Ω with power off. Not yet checked.
-- Listen-only tap (e.g. MAX3485 at 3.3 V): A ← green, B ← yellow, GND ← blue, RO → ESP RX, DE and /RE tied to GND. **Red (supply) must never connect to the ESP.**
+- **Tested tap (XY-485 module): A+ ← yellow, B- ← green, GND ← blue.** With green on A+ the receiver never switched, so on this unit yellow behaves as A despite the meter reading above. Wiring details: [esp/vsc-serial-bridge/README.md](../esp/vsc-serial-bridge/README.md). **Red (supply) must never connect to the ESP.**
 
 ![Wall box colour label](images/wallbox_wire_label.jpg)
 
@@ -215,6 +215,29 @@ How that lines up with the I²C fields above:
 | `3B` byte 2 = `54` | p19 = `54` | Same value; meaning still open |
 
 His capture has no temperatures in the broadcast, the checksum is unknown, and replaying a boost message did not work. Lining up a simultaneous RS485 + I²C capture is the next step.
+
+## RS485 capture on my unit (work in progress, requires further testing)
+
+Captured with the ESP bridge's bus tap (1200 baud 8N1, shown MSB-first). The same 9 frames repeat every 0.71 s, matching the forum capture above with each byte bit-reversed:
+
+```
+84 55 6F 6B
+88 6F 32
+8A 7F 7F 7F 20
+8C 7F 7F 59
+CC 7F 7F 19
+A1 54 7F 58 7F 7F 07
+C5 13 13 24 02 24 02 10
+AE 7F 06 21 00 23
+DC 4D 2A 6E
+```
+
+- **Framing:** the first byte (frame ID) always has bit 7 set; every byte after it is 7-bit. `7F` is the empty value.
+- **Checksum:** all bytes of a frame XOR to `D5`, including the ID. Valid for every frame captured so far.
+- **Values are active-low:** XOR a data byte with `7F` to read it.
+- **Humidity:** `DC` byte 1. `4D` XOR `7F` = 50 %, which matched HA (MRXBOX Humidity 50). It flickered to `4C` (51 %).
+- **Fan speed:** `8A` byte 2 is `7F` / `1F` / `17` at speed 1 / 2 / 3 (checksum byte follows). `88` byte 1 is `6F` at speed 1 and `6B` at speed 2 and 3.
+- **Not found yet:** temperatures (HA showed 21 °C extract, 13 °C intake). No broadcast byte matches them; they may only travel when the VSC asks for them.
 
 ## Still open
 - **Later: real damper position.** p9 0x08 is the unit's decision, not the damper. Once the other reply bits are understood, look for one that lags p9 0x08 by about a minute (the wax actuator travelling), or capture the RS485 bus during a bypass change.
