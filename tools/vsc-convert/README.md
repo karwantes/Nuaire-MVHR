@@ -30,7 +30,7 @@ write if it is missing or doesn't match, so keep the two together. Menu option 3
 cards it recognises as a VSC card. Option 5 restores to a blank or replacement card: it
 lists the removable disks (never the system disk) and asks you to type the disk number
 again before it overwrites anything (**requires further testing** on a real card). See
-[docs/convert-card.md](../../docs/convert-card.md#9-restore-and-recovery).
+[docs/option2-vsc-console.md](../../docs/option2-vsc-console.md#9-restore-and-recovery).
 
 The backup is saved in the current folder and needs free space the size of the card.
 
@@ -84,4 +84,4 @@ vscconv.py restore <target> <backup.img>
   writes verified), and restore refused without the `.sha256`. Same `i2clog.so` as 1.0,
   so the same 26 writes.
 
-Step-by-step guide with parts and wiring: [docs/convert-card.md](../../docs/convert-card.md).
+Step-by-step guide with parts and wiring: [docs/option2-vsc-console.md](../../docs/option2-vsc-console.md).

@@ -59,7 +59,7 @@ Tapping the logo at the top right of this page still opens the hidden debug page
 
 `darken.py` turns your card's stock images into a dark set automatically: the page goes dark, coloured panels get muted and the text goes light. It's a good base to edit by hand.
 
-From the repo root, after [extracting your card's root filesystem](../README.md#2-extract-the-second-partition) into `rootfs_p2`:
+From the repo root, after [extracting your card's root filesystem](../docs/build-logger-card.md#2-extract-the-second-partition) into `rootfs_p2`:
 
 ```sh
 pip install pillow numpy
@@ -77,7 +77,7 @@ Keep `my_dark/` to yourself. It is made from Nuaire's artwork, so don't publish 
 
 ## Installing it
 
-You need `i2clog.so` in place first: a card built with `tools/mkimg.py` (see the [main README](../README.md#sd-card-images)) already has it.
+You need `i2clog.so` in place first: a card built with `tools/mkimg.py` (see [build-logger-card.md](../docs/build-logger-card.md#sd-card-images)) already has it.
 
 ### On a spare card (simplest)
 
@@ -132,7 +132,7 @@ The tick box only appears with a theme installed (`images/.dark`), because the s
 ### What does not change
 
 - **The touch screen keeps working.** Any key does what it always did. That's the end-user override; it stays in place until HA or another touch changes it.
-- **The MSP430 and MRXBOX keep their own protections.** Only `es-lcd`'s automations are stopped. Faults and any safety logic in the unit itself still run.
+- **The bus chip and MRXBOX keep their own protections.** Only `es-lcd`'s automations are stopped. Faults and any safety logic in the unit itself still run.
 - **The screen still shows the live state**, including changes made from HA.
 
 ### How HA drives it

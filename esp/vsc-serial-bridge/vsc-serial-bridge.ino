@@ -1,4 +1,6 @@
-// VSC serial bridge: ESP32 <-> Nuaire VSC Linux console, over WiFi.
+// VSC serial bridge: ESP32 for the Nuaire MRXBOX, two ways (docs/option1-no-vsc.md,
+// docs/option2-vsc-console.md): on the VSC's Linux console, or on the RS485 bus in the
+// VSC's place (VSC emulation).
 //
 //   telnet / raw TCP  port 23   - interactive console (PuTTY "Raw" mode)
 //   http://<host>/              - setup and status: WiFi (scan and join), MQTT, restart
@@ -12,21 +14,22 @@
 //   http://<host>/busbytes      - the same, byte by byte
 //   telnet / raw TCP  port 2323 - the same bus frames, live (read only)
 //   http://<host>/emu           - VSC emulation (no VSC on the bus): JSON state; POST to change
+//   http://<host>/unit          - MRXBOX readings and controls, in either option
 //
-// Wiring: the VSC console is RS232 level, so go through a MAX3232 module
-// (or at least a 10k series resistor on RX), never the red bus wire:
-//   ESP RX (VSC_RX_PIN) <- VSC TX
+// Power: VIN from a 5 V buck module on the bus's red (+10 V) and blue (0 V), or USB.
+// Red never goes to an ESP pin directly.
+// Option 2, VSC console (RS232 level, polarity RS232 (inverted) by default):
+//   ESP RX (VSC_RX_PIN) <- 10k <- VSC TX   (or through a MAX3232 module, polarity TTL)
 //   ESP TX (VSC_TX_PIN) -> VSC RX
 //   ESP GND             -  VSC 0V
-// RS485 tap, listen only, through a 3.3 V MAX3485 module (termination removed):
-//   module A <- yellow, B <- green (tested), GND <- blue and ESP GND, never red
-//   module RO -> ESP BUS_RX_PIN, DE and /RE tied to GND, DI unconnected
-//   or an auto-direction module (XY-485): RXD -> BUS_RX_PIN, TXD -> BUS_TX_PIN (held high)
+// Option 1, RS485 bus, auto-direction module (XY-485):
+//   A+ <- yellow, B- <- green, GND <- blue and ESP GND, VCC <- ESP VIN
+//   RXD -> BUS_RX_PIN, TXD <- BUS_TX_PIN (held high while not sending)
 //
-// MQTT (optional, broker set at http://<host>/): Home Assistant discovery for
-// fan speed 1/2/3, bypass auto/on/off, bypass setpoint and bypass state. It works
-// through the /tmp control files of logger/i2clog.so, by typing shell lines on the
-// console, so the console must be logged in (the bridge answers "login:" with root).
+// MQTT (optional, broker set at http://<host>/): Home Assistant discovery for the
+// MRXBOX device. In option 2 it works through the /tmp control files of
+// logger/i2clog.so, by typing shell lines on the console, so the console must be
+// logged in (the bridge answers "login:" with root). In option 1 it drives the emulation.
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -57,7 +60,7 @@
 #define TELNET_PORT 23
 #define LOG_SIZE    16384
 
-// RS485 bus listener (receive only). BUS_TX_PIN is held high and never sends:
+// RS485 bus. BUS_TX_PIN is held high except while the emulation sends:
 // on an auto-direction module (XY-485) a high TXD keeps it in receive.
 #define BUS_RX_PIN  25
 #define BUS_TX_PIN  26
@@ -490,11 +493,31 @@ static const uint8_t FAULT_BYTE[6] = {8, 8, 8, 8, 9, 9}, FAULT_BIT[6] = {0x08, 0
 // doesn't look like the answer.
 #define POLL_CMD "echo \"@\"\"S\" $(cat /tmp/bypass_state 2>/dev/null) \"@\"\"T\" $(cat /tmp/sensors 2>/dev/null) \"@\"\"R\" $(cat /tmp/runtime 2>/dev/null) \"@\"\"C\" $(cat /tmp/screen_state 2>/dev/null) \"@\"\"M\" $(cat /tmp/modes 2>/dev/null) \"@\"\"A\" $(cat /tmp/airflow_state 2>/dev/null) \"@\"\"K\" $(cat /tmp/clock 2>/dev/null) $(ls /tmp/speed2 /tmp/speed3 /tmp/bypass_on /tmp/bypass_off /tmp/debug 2>/dev/null)"
 
+// The last value of each vsc/... state topic, for the /unit page. Kept with or without MQTT, so
+// the page works on its own. While the page is open (a /unit/state in the last 2 min) the
+// console is polled and logged into even with no broker.
+#define WEB_KEYS 48
+static String webKey[WEB_KEYS], webVal[WEB_KEYS];
+static int webKeys = 0;
+static uint32_t webUnitT = 0;
+
+static void webPut(const char *topic, const char *payload) {
+  if (strncmp(topic, MQ_BASE "/", sizeof MQ_BASE)) return;   // not discovery
+  const char *k = topic + sizeof MQ_BASE;
+  if (!strcmp(k, "log") || !strcmp(k, "log_batch") || !strcmp(k, "status")) return;
+  for (int i = 0; i < webKeys; i++)
+    if (webKey[i] == k) { webVal[i] = payload; return; }
+  if (webKeys < WEB_KEYS) { webKey[webKeys] = k; webVal[webKeys++] = payload; }
+}
+
+static bool pollWanted() { return mqConnected || (webUnitT && millis() - webUnitT < 120000); }
+
 static void mqPub(const char *topic, const char *payload, bool retain = true) {
+  webPut(topic, payload);
   if (mq && mqConnected) esp_mqtt_client_publish(mq, topic, payload, 0, 0, retain);
 }
 
-// The VSC clock: es-lcd's copy of the MSP430 clock (hours and minutes), which the library writes
+// The VSC clock: es-lcd's copy of the bus chip's clock (hours and minutes), which the library writes
 // to /tmp/clock. That clock can stop (one was stuck at 04:00), and with it every per-minute
 // countdown: screen sleep, the speed 2/3 timers, night and holiday. So once NTP time is known and
 // the VSC is more than a minute out, the bridge sets it through /tmp/settime (HHMMDD), at most
@@ -1164,7 +1187,7 @@ static void mqConsole(const uint8_t *d, size_t n) {
       continue;
     }
     if (len < sizeof line - 1) line[len++] = c;
-    if (len >= 6 && !memcmp(line + len - 6, "login:", 6) && mq) {
+    if (len >= 6 && !memcmp(line + len - 6, "login:", 6) && (mq || pollWanted())) {
       vscShell = false;
       vscLine("root");
     } else if (len >= 9 && !memcmp(line + len - 9, "Password:", 9)) {
@@ -1202,15 +1225,16 @@ static void setupMqtt() {
 }
 
 static void mqLoop() {
-  if (!mq || upState) return;   // HA commands wait until an upload is done
+  if (upState) return;   // HA commands wait until an upload is done
   MqMsg m;
-  while (xQueueReceive(mqQueue, &m, 0) == pdTRUE) mqHandle(m.topic, m.data);
-  if (!mqConnected) return;
-  if (mqAnnounce) {
+  if (mq)
+    while (xQueueReceive(mqQueue, &m, 0) == pdTRUE) mqHandle(m.topic, m.data);
+  if (mqConnected && mqAnnounce) {
     mqAnnounce = false;
     mqAnnounceAll();
   }
   if (mqLogBatch.length() && millis() - mqLogT >= MQ_LOG_MS) mqLogFlush();
+  if (!pollWanted()) return;
   if (emu.on) {
     mqEmuLoop();
   } else if ((!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) && (!mqManual || millis() - mqManual >= 30000)) {
@@ -1373,6 +1397,7 @@ button{background:#245;border-color:#368;cursor:pointer}button:disabled{opacity:
 #nets div{padding:7px 4px;border-bottom:1px solid #222;cursor:pointer}#nets div:hover{background:#1c1c1c}
 </style></head><body>
 <h2>VSC bridge</h2>
+<p><a href="/unit">MRXBOX readings and controls &rarr;</a></p>
 <h3>Status</h3><table id="st"><tr><td>Loading...</td></tr></table>
 <h3>WiFi</h3>
 <form method="POST" action="/wifi" id="wf">
@@ -1434,6 +1459,76 @@ $('scan').onclick=async()=>{
  b.disabled=false;b.textContent='Scan again';
 };
 $('nets').onclick=e=>{const d=e.target.closest('div[data-s]');if(d){$('ssid').value=d.dataset.s;$('wp').value='';$('wp').focus()}};
+</script></body></html>)HTML";
+
+// The unit: readings and the everyday controls, from the same state and through the same
+// commands as HA (console with the VSC, or the emulated VSC's answers).
+static const char UNIT_PAGE[] PROGMEM = R"HTML(<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MRXBOX</title>
+<style>
+body{font-family:sans-serif;margin:0 auto;padding:8px 16px 24px;max-width:520px;background:#111;color:#ddd}
+h2{font-size:20px;margin:12px 0}h3{font-size:16px;margin:22px 0 6px;color:#9cf}
+table{border-collapse:collapse;width:100%;font-size:14px}td{padding:4px;border-bottom:1px solid #222}
+td:first-child{color:#999;width:45%}
+.seg{display:flex;gap:6px;margin:4px 0 10px}.seg button{flex:1}
+button,input{font-size:16px;box-sizing:border-box;padding:8px;background:#1c1c1c;color:#ddd;border:1px solid #444;border-radius:4px}
+button{cursor:pointer}button.on{background:#245;border-color:#5ad;color:#fff}button:disabled{opacity:.5}
+.sp{display:flex;gap:6px;align-items:center;margin:4px 0}.sp span{flex:1;color:#999;font-size:14px}.sp input{width:80px}
+.ok{color:#8d8}.bad{color:#f99}.dim{color:#888;font-size:13px}a{color:#9cf}
+</style></head><body>
+<h2>MRXBOX</h2>
+<table id="st"><tr><td>Loading...</td></tr></table>
+<h3>Fan speed</h3><div class="seg" data-k="speed"><button>1</button><button>2</button><button>3</button></div>
+<h3>Bypass</h3><div class="seg" data-k="bypass"><button>Auto</button><button>On</button><button>Off</button></div>
+<h3>Modes</h3><div class="seg"><button data-t="night">Night</button><button data-t="holiday">Holiday</button><button data-t="rising_boost" id="rb">Rising boost</button></div>
+<h3>Setpoints</h3>
+<div class="sp"><span>Bypass (°C, 15-30)</span><input data-n="bypass_temp" inputmode="numeric"><button>Set</button></div>
+<div class="sp"><span>Humidity (%, 50-85)</span><input data-n="humidity_sp" inputmode="numeric"><button>Set</button></div>
+<div class="sp"><span>Frost (°C, -5 to 0)</span><input data-n="frost_sp" inputmode="numeric"><button>Set</button></div>
+<h3>Airflow %</h3><table id="air"></table>
+<p class="dim" id="msg"></p>
+<p class="dim"><a href="/">Setup</a> &middot; <a href="/console">Console</a> &middot; <a href="/bus">RS485 bus</a></p>
+<script>
+const $=i=>document.getElementById(i),Q=s=>document.querySelectorAll(s);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const row=(k,v,c)=>`<tr><td>${k}</td><td class="${c||''}">${v}</td></tr>`;
+let v={},live=false,busy=0;
+const g=(k,u)=>v[k]===undefined||v[k]==='None'?'&ndash;':esc(v[k])+(u||'');
+const send=async(k,x)=>{
+ busy=Date.now();$('msg').textContent='Sending...';
+ try{const r=await fetch('/unit/set',{method:'POST',body:new URLSearchParams({k,v:x})});
+  $('msg').textContent=r.ok?'Sent. The state updates within a few seconds.':'Not accepted: '+await r.text()}
+ catch(e){$('msg').textContent='No answer from the bridge'}
+ setTimeout(upd,emu?1500:6000);
+};
+let emu=false;
+const upd=async()=>{
+ try{
+  const s=await(await fetch('/unit/state')).json();v=s.v;emu=s.emu;
+  const comms=v.comms==='ON';live=v.vsc_status==='online';
+  let h=row('Control',emu?'ESP in place of the VSC':'VSC console '+(live?'online':(s.shell?'waiting for an answer':'not at a shell yet')),live?'ok':'bad');
+  h+=row('Unit',comms?'Connected':'No communication',comms?'ok':'bad');
+  h+=row('Running speed',g('fan_running'))+row('Extract air',g('temp_extract',' °C'))+row('Intake air',g('temp_intake',' °C'));
+  h+=row('Humidity',g('humidity',' %'))+row('Bypass',v.bypass_state==='ON'?'Open':v.bypass_state==='OFF'?'Closed':'&ndash;');
+  const f=['fault_supply_fan','fault_extract_fan','fault_heater','fault_cooler','fault_frost'].filter(k=>v[k]==='ON');
+  h+=row('Faults',f.length?f.map(k=>k.slice(6).replace('_',' ')).join(', '):comms?'None':'&ndash;',f.length?'bad':'');
+  if(emu&&v.timers){try{h+=row('Time left',esc(JSON.parse(v.timers).text))}catch(e){}}
+  h+=row('Run hours',g('run_hours'))+row('Filter hours',g('filter_hours')+(v.filter_change==='ON'?' <span class="bad">change due</span>':''));
+  if(v.clock&&!emu)h+=row('VSC clock',g('clock'));
+  $('st').innerHTML=h;
+  Q('.seg[data-k] button').forEach(b=>{b.classList.toggle('on',v[b.parentNode.dataset.k]===b.textContent);b.disabled=!live});
+  Q('button[data-t]').forEach(b=>{b.classList.toggle('on',v[b.dataset.t]==='ON');b.disabled=!live});
+  $('rb').style.display=emu?'':'none';
+  Q('input[data-n]').forEach(i=>{if(document.activeElement!==i&&v[i.dataset.n]!==undefined)i.value=v[i.dataset.n];i.nextElementSibling.disabled=!live});
+  const a=k=>g(k);
+  $('air').innerHTML=row('','Supply / extract')+[1,2,3].map(n=>row('Speed '+n,a('air_s'+n)+' / '+a('air_e'+n))).join('');
+ }catch(e){$('st').innerHTML=row('Status','No answer from the bridge','bad')}
+};
+Q('.seg[data-k] button').forEach(b=>b.onclick=()=>send(b.parentNode.dataset.k,b.textContent));
+Q('button[data-t]').forEach(b=>b.onclick=()=>send(b.dataset.t,v[b.dataset.t]==='ON'?'OFF':'ON'));
+Q('input[data-n]').forEach(i=>i.nextElementSibling.onclick=()=>send(i.dataset.n,i.value));
+setInterval(upd,3000);upd();
 </script></body></html>)HTML";
 
 // ---- setup network (access point with a captive portal) ----
@@ -1581,6 +1676,29 @@ static void handleNotFound() {
 static void setupWeb() {
   web.on("/", HTTP_GET, [] { web.send_P(200, "text/html", SETUP_PAGE); });
   web.on("/console", HTTP_GET, [] { web.send_P(200, "text/html", PAGE); });
+  web.on("/unit", HTTP_GET, [] { web.send_P(200, "text/html", UNIT_PAGE); });
+  web.on("/unit/state", HTTP_GET, [] {
+    if (!webUnitT || millis() - webUnitT >= 120000) mqLastPoll = 0;   // page just opened: poll now
+    webUnitT = millis();
+    if (!emu.on && mqBypassTemp) webPut(MQ_BASE "/bypass_temp", String(mqBypassTemp).c_str());
+    String j = "{\"emu\":" + String(emu.on ? "true" : "false") + ",\"shell\":" + (vscShell ? "true" : "false") + ",\"v\":{";
+    for (int i = 0; i < webKeys; i++) {
+      if (i) j += ",";
+      j += jsonStr(webKey[i]) + ":" + jsonStr(webVal[i]);
+    }
+    web.send(200, "application/json", j + "}}");
+  });
+  web.on("/unit/set", HTTP_POST, [] {
+    // The everyday controls only: no filter reset, emulation switch or debug from this page.
+    static const char *const OK[] = {"speed", "bypass", "bypass_temp", "humidity_sp", "frost_sp", "night", "holiday", "rising_boost"};
+    String k = web.arg("k");
+    bool ok = false;
+    for (const char *o : OK) ok |= k == o;
+    if (!ok || !web.hasArg("v")) { web.send(400, "text/plain", "unknown setting"); return; }
+    if (!emu.on && !vscShell) { web.send(503, "text/plain", "the VSC console isn't at a shell"); return; }
+    mqHandle((String(MQ_BASE "/") + k + "/set").c_str(), web.arg("v").c_str());
+    web.send(200, "text/plain", "ok");
+  });
   web.on("/setup/status", HTTP_GET, handleSetupStatus);
   web.on("/scan", HTTP_GET, handleScan);
   auto toSetup = [] {

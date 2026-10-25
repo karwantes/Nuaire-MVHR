@@ -13,18 +13,19 @@ wired straight to the VSC's **LINUX TERMINAL** header, with no ESP:
 
 So you get the same entities as the bridge's MQTT discovery.
 
-The VSC card must be converted first ([docs/convert-card.md](../../docs/convert-card.md)).
+The VSC card must be converted first ([option 2](../../docs/option2-vsc-console.md)).
 Home Assistant doesn't convert anything.
 
 ## Connection modes
 
 | Mode | How | Status |
 |---|---|---|
-| 1. ESP bridge on the VSC console | MQTT discovery from [the bridge](../../esp/vsc-serial-bridge/README.md). It doesn't need this integration. | Working |
-| 2. USB serial dongle on the VSC console | This integration | Experimental, requires further testing |
-| 3. TTL/RS485 adapter on the bus | Read only, planned once the bus is mapped | Not started |
+| ESP bridge on the VSC console ([option 2](../../docs/option2-vsc-console.md)) | MQTT discovery from [the bridge](../../esp/vsc-serial-bridge/README.md). It doesn't need this integration. | Working |
+| ESP bridge on the RS485 bus, no VSC ([option 1](../../docs/option1-no-vsc.md)) | MQTT discovery from the bridge. It doesn't need this integration. | Working |
+| USB serial dongle on the VSC console | This integration | Experimental, requires further testing |
 
-Use mode 1 or mode 2, not both: two masters on one console would type over each other.
+Use the ESP or the dongle on the console, not both: two masters on one console would type over each other.
+
 
 ## Wiring
 
@@ -32,7 +33,7 @@ The header is RS232 level (115200 8N1), so a **USB-to-RS232** dongle connects to
 directly: dongle TX to VSC RX, dongle RX to VSC TX, GND to 0V. A plain USB-TTL (3.3 V)
 adapter needs a MAX3232 module in between, as on the ESP.
 
-Pin positions are in [docs/convert-card.md](../../docs/convert-card.md).
+Pin positions are in [option 2](../../docs/option2-vsc-console.md).
 
 ## Install
 

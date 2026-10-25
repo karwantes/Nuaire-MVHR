@@ -121,7 +121,7 @@ def parse_poll(line: str) -> dict | None:
     if a:
         st.update(zip(AIR_KEYS, a))
 
-    # "@K HH MM" (/tmp/clock): es-lcd's copy of the MSP430 clock
+    # "@K HH MM" (/tmp/clock): es-lcd's copy of the bus chip's clock
     k = _ints(_section(body, "K"), 2)
     if k and 0 <= k[0] <= 23 and 0 <= k[1] <= 59:
         st["clock"] = f"{k[0]:02d}:{k[1]:02d}"
@@ -131,7 +131,7 @@ def parse_poll(line: str) -> dict | None:
 def clock_command(clock: str, hour: int, minute: int, day: int) -> str | None:
     """Shell line that sets the VSC clock to hour:minute (day of month) when the VSC's
     "HH:MM" is more than a minute out, else None. A minute apart is the poll landing on
-    the minute. The MSP430 clock can stop, and with it every per-minute countdown (screen
+    the minute. The bus chip's clock can stop, and with it every per-minute countdown (screen
     sleep, the speed 2/3 timers, night and holiday)."""
     try:
         h, m = (int(x) for x in clock.split(":"))

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 450" font-family="Arial, Helvetica, sans-serif" font-size="13">
+  <rect width="900" height="450" fill="#ffffff"/>
+  <text x="450" y="18" text-anchor="middle" font-size="15" font-weight="bold">Option 1: no VSC. ESP32 and an XY-485 module on the bus cable</text>
+
+  <!-- bus cable -->
+  <text x="20" y="96" fill="#333">bus cable from the unit</text>
+  <text x="20" y="80" fill="#8a2020" font-size="11">(VSC unplugged from it)</text>
+  <g stroke-width="4" fill="none">
+    <path d="M20,110 H120 V45 H300" stroke="#d00000"/>
+    <path d="M20,130 H140 V75 H300" stroke="#1060d0"/>
+    <path d="M20,150 H300" stroke="#e0b000"/>
+    <path d="M20,170 H300" stroke="#109030"/>
+  </g>
+  <g font-size="11">
+    <text x="24" y="124">red +10 V</text>
+    <text x="24" y="144">blue 0 V</text>
+    <text x="24" y="164">yellow</text>
+    <text x="24" y="184">green</text>
+  </g>
+
+  <!-- buck regulator -->
+  <rect x="300" y="25" width="160" height="70" rx="6" fill="#f3ead0" stroke="#9a7a10" stroke-width="2"/>
+  <text x="380" y="50" text-anchor="middle" font-weight="bold">5 V buck module</text>
+  <text x="380" y="66" text-anchor="middle" font-size="11">(LM2596 type)</text>
+  <text x="380" y="82" text-anchor="middle" font-size="11">set to 5.0 V first</text>
+  <g font-size="10">
+    <text x="304" y="41">IN+</text>
+    <text x="304" y="88">IN−</text>
+    <text x="456" y="41" text-anchor="end">OUT+</text>
+    <text x="456" y="88" text-anchor="end">OUT−</text>
+  </g>
+
+  <!-- XY-485 -->
+  <rect x="300" y="130" width="160" height="200" rx="6" fill="#e8f3ea" stroke="#206a30" stroke-width="2"/>
+  <text x="380" y="320" text-anchor="middle" font-weight="bold">XY-485 module</text>
+  <g font-size="12">
+    <text x="308" y="155">A+</text>
+    <text x="308" y="175">B−</text>
+    <text x="452" y="204" text-anchor="end">VCC</text>
+    <text x="452" y="234" text-anchor="end">GND</text>
+    <text x="452" y="274" text-anchor="end">RXD</text>
+    <text x="452" y="304" text-anchor="end">TXD</text>
+  </g>
+
+  <!-- ESP32 -->
+  <rect x="700" y="150" width="180" height="200" rx="8" fill="#e6eef8" stroke="#204a80" stroke-width="2"/>
+  <text x="790" y="340" text-anchor="middle" font-weight="bold">ESP32 dev board</text>
+  <g font-size="12">
+    <text x="708" y="204">VIN (5 V)</text>
+    <text x="708" y="234">GND</text>
+    <text x="708" y="274">GPIO25</text>
+    <text x="708" y="304">GPIO26</text>
+  </g>
+
+  <!-- power -->
+  <g stroke-width="3" fill="none">
+    <path d="M460,45 H640 V200 H700" stroke="#d00000"/>
+    <path d="M460,75 H620 V230 H700" stroke="#000000"/>
+    <path d="M460,200 H640" stroke="#d00000"/>
+    <path d="M460,230 H620" stroke="#000000"/>
+  </g>
+  <circle cx="640" cy="200" r="5" fill="#d00000"/>
+  <circle cx="620" cy="230" r="5" fill="#000"/>
+
+  <!-- data -->
+  <g stroke-width="3" fill="none">
+    <path d="M460,270 H700" stroke="#c06000"/>
+    <path d="M700,300 H460" stroke="#6a2bb0"/>
+  </g>
+  <polygon points="660,264 672,270 660,276" fill="#c06000"/>
+  <polygon points="500,294 488,300 500,306" fill="#6a2bb0"/>
+
+  <g font-size="12">
+    <text x="20" y="390">• Red +10 V goes only to the buck module's IN+, never to an ESP or module pin. Blue 0 V, the buck's IN−/OUT−, ESP GND and XY-485 GND are one ground.</text>
+    <text x="20" y="408">• A+ on yellow, B− on green. No 120 Ω terminator. TXD must go to GPIO26: the firmware holds it high, which keeps the module in receive.</text>
+    <text x="20" y="426">• The XY-485 takes 5 V on VCC; its own 3.3 V regulator keeps RXD at 3.3 V.</text>
+  </g>
+</svg>
