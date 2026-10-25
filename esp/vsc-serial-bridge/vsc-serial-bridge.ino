@@ -1,13 +1,17 @@
 // VSC serial bridge: ESP32 <-> Nuaire VSC Linux console, over WiFi.
 //
 //   telnet / raw TCP  port 23   - interactive console (PuTTY "Raw" mode)
-//   http://<host>/              - live log, send a line, Ctrl-C, baud, TX on/off
+//   http://<host>/              - setup and status: WiFi (scan and join), MQTT, restart
+//   http://<host>/console       - live log, send a line, Ctrl-C, baud, TX on/off
 //   http://<host>/log           - last 16 KB of console output as plain text
 //   http://<host>/status        - JSON: uptime, RSSI, baud, byte counters
 //   ArduinoOTA                  - reflash over WiFi once it is installed
 //   http://<host>/bus           - RS485 bus listener: one line per frame, hex
 //   http://<host>/buslog        - last 16 KB of bus frames as plain text
+//   http://<host>/bustiming     - bit timing of each frame, measured from pin edges
+//   http://<host>/busbytes      - the same, byte by byte
 //   telnet / raw TCP  port 2323 - the same bus frames, live (read only)
+//   http://<host>/emu           - VSC emulation (no VSC on the bus): JSON state; POST to change
 //
 // Wiring: the VSC console is RS232 level, so go through a MAX3232 module
 // (or at least a 10k series resistor on RX), never the red bus wire:
@@ -19,24 +23,31 @@
 //   module RO -> ESP BUS_RX_PIN, DE and /RE tied to GND, DI unconnected
 //   or an auto-direction module (XY-485): RXD -> BUS_RX_PIN, TXD -> BUS_TX_PIN (held high)
 //
-// MQTT (optional, broker set at http://<host>/mqtt): Home Assistant discovery for
+// MQTT (optional, broker set at http://<host>/): Home Assistant discovery for
 // fan speed 1/2/3, bypass auto/on/off, bypass setpoint and bypass state. It works
 // through the /tmp control files of logger/i2clog.so, by typing shell lines on the
 // console, so the console must be logged in (the bridge answers "login:" with root).
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include "driver/uart.h"
 #include "mqtt_client.h"
 #include <MD5Builder.h>
+#include "soc/gpio_reg.h"
 
-// WiFi credentials are not in the code: on first boot (or if the saved network
-// can't be joined) the ESP starts access point HOSTNAME / AP_PASS, and
-// http://192.168.4.1/wifi stores them in flash.
+// WiFi credentials are not in the code. On first boot, when the saved network
+// can't be joined for a minute, or when the BOOT button is held for 3 s, the ESP
+// starts its own network HOSTNAME / AP_PASS. A phone that joins it is sent to the
+// setup page (http://192.168.4.1/), which scans for networks and stores the
+// choice in flash. The setup network goes off again once the ESP is on the saved
+// network and nobody has used the setup network for 5 minutes.
 #define HOSTNAME    "vsc-bridge"
 #define AP_PASS     "nuaire123"
+#define AP_BUTTON   0         // BOOT button: hold 3 s for the setup network
+#define FW_BUILD    __DATE__ " " __TIME__
 
 // GPIO16/17 are used by PSRAM on WROVER modules; pick e.g. 25/26 there.
 #define VSC_RX_PIN  16
@@ -69,12 +80,50 @@ static bool busRev = true;
 static volatile uint32_t busBytes = 0, busFrames = 0, busDropped = 0;
 static volatile uint32_t busEdges = 0;   // level changes on BUS_RX_PIN, whatever the baud
 
+// VSC emulation, for when the VSC is off the bus. The unit polls each VSC slot
+// (88, 8A, AE, C5) with its ID byte, and if nobody answers it sends its own
+// default bytes, starting about 25 us after the ID. The XY-485 only drives the
+// bus while TXD is low, so our 1 bits are passive and our 0 bits win, as the
+// VSC's bus chip does. The ID is sampled bit by bit in a timer interrupt and
+// the answer is bit-banged on BUS_TX_PIN in step with the unit's first byte.
+struct Emu {
+  bool on;
+  uint8_t speed;      // 1..3
+  uint8_t mode;       // AE byte 1, active low: 01 bypass on, 10 bypass off, 08 night, 04 holiday, 02 rising boost
+  uint8_t bypassSp;   // deg C
+  uint8_t humSp;      // %
+  uint8_t frost;      // AE byte 4
+  uint8_t air[6];     // airflow %, C5 order: supply 3, extract 3, supply 1, supply 2, extract 1, extract 2
+};
+static Emu emu = {false, 1, 0x7F, 24, 66, 0, {100, 100, 18, 32, 18, 32}};
+static const uint8_t EMU_ID[4] = {0x88, 0x8A, 0xAE, 0xC5};
+static uint8_t emuFrame[4][8], emuLen[4];   // data bytes per slot, checksum last
+static portMUX_TYPE emuMux = portMUX_INITIALIZER_UNLOCKED;
+// The unit sends its own default bytes under ours and checks the bus between
+// bytes, so each of our bytes starts on the unit's start bit. If the unit has
+// stopped, we keep its timing: first byte +30 us after the ID, then +100 us,
+// checksum +78 us (measured with the VSC off).
+static volatile int32_t emuOffUs = 30, emuGapUs = 100, emuLastGapUs = 78;
+static volatile uint32_t emuSent[4], emuLate, emuSynced, emuOwn;
+static volatile uint8_t emuState;           // 0 idle, 1 reading an ID, 2 sending
+static volatile bool emuWait;               // sending, between bytes: waiting for the unit's start bit
+static volatile uint32_t emuStart, emuPrevEdge, emuByteT, emuDue;
+static hw_timer_t *emuTimer;
+
+// Edge timestamps (µs) from the BUS_RX_PIN interrupt. Each sender has its own
+// clock and driver, so the bit length and low/high widths tell senders apart.
+#define EDGE_RING   2048
+#define EDGE_GAP_US 10000   // longest run inside a frame is 9 bits (7.5 ms)
+static volatile uint32_t edgeT[EDGE_RING];
+static volatile uint32_t edgeHead = 0;
+
 struct Ring {
   char buf[LOG_SIZE];
   size_t head = 0;
   bool full = false;
 };
-static Ring conLog, busLog;
+static Ring conLog, busLog, timLog;
+static Ring *byteLog;   // on the heap: static DRAM is full
 
 struct BusFrame {
   uint32_t t;
@@ -112,6 +161,196 @@ static uint8_t rev8(uint8_t b) {
   return (b & 0xAA) >> 1 | (b & 0x55) << 1;
 }
 
+// Every 25 us while emuState is set: sample the ID at its bit centres, then
+// send the slot's bytes, MSB first, start bit low, stop bit high. Each byte
+// starts on the unit's start bit (busEdgeIsr), or at emuDue if it has none.
+static void IRAM_ATTR emuTick() {
+  static uint8_t bit, id, slot, len, out[8], j;
+  if (!emuState) { bit = id = j = 0; return; }
+  uint32_t dt = micros() - emuStart;
+  if (emuState == 1) {
+    if (dt < (3 + 2 * bit) * 1000000UL / (2 * BUS_BAUD)) return;
+    int lv = (REG_READ(GPIO_IN_REG) & BIT(BUS_RX_PIN)) ? 1 : 0;
+    if (bit < 8) { id = id << 1 | lv; bit++; return; }
+    slot = id == 0x88 ? 0 : id == 0x8A ? 1 : id == 0xAE ? 2 : id == 0xC5 ? 3 : 255;
+    if (!lv || slot == 255) { emuState = 0; return; }   // no stop bit, or not our slot
+    portENTER_CRITICAL_ISR(&emuMux);
+    len = emuLen[slot];
+    for (int i = 0; i < len; i++) out[i] = emuFrame[slot][i];
+    portEXIT_CRITICAL_ISR(&emuMux);
+    bit = 1;
+    j = 0;
+    emuDue = emuStart + 10 * 1000000UL / BUS_BAUD + emuOffUs;
+    emuWait = true;
+    emuState = 2;
+    return;
+  }
+  if (emuWait) {
+    if ((int32_t)(micros() - emuDue) < 60) return;
+    emuByteT = emuDue;   // the unit has not started a byte: send on its timing
+    emuWait = false;
+    emuOwn++;
+    REG_WRITE(GPIO_OUT_W1TC_REG, BIT(BUS_TX_PIN));
+    bit = 1;
+  }
+  uint32_t t = bit * 1000000UL / BUS_BAUD;
+  dt = micros() - emuByteT;
+  if (dt < t) return;
+  if (dt - t > 100) emuLate++;
+  int lv = bit == 9 ? 1 : (out[j] >> (8 - bit)) & 1;
+  REG_WRITE(lv ? GPIO_OUT_W1TS_REG : GPIO_OUT_W1TC_REG, BIT(BUS_TX_PIN));
+  if (++bit < 10) return;
+  bit = 1;
+  if (++j < len) {
+    emuDue = emuByteT + 10 * 1000000UL / BUS_BAUD + (j == len - 1 ? emuLastGapUs : emuGapUs);
+    emuWait = true;
+    return;
+  }
+  emuSent[slot]++;
+  emuState = 0;
+}
+
+// Bus bytes from the emulated settings. A bus byte is the VSC's I2C byte
+// bit-reversed; each frame XORs to D5.
+static void emuBuild() {
+  uint8_t f[4][8], n[4];
+  f[0][0] = emu.speed == 1 ? 0x6F : 0x6B;
+  n[0] = 1;
+  f[1][0] = 0x7F;
+  f[1][1] = emu.speed == 1 ? 0x7F : emu.speed == 2 ? 0x1F : 0x17;
+  f[1][2] = 0x7F;
+  n[1] = 3;
+  f[2][0] = emu.mode;
+  f[2][1] = rev8(emu.bypassSp << 2);
+  f[2][2] = rev8(emu.humSp << 1);
+  f[2][3] = rev8(emu.frost << 4);
+  n[2] = 4;
+  for (int i = 0; i < 6; i++) f[3][i] = rev8(emu.air[i] << 1);
+  n[3] = 6;
+  for (int k = 0; k < 4; k++) {
+    uint8_t x = 0xD5 ^ EMU_ID[k];
+    for (int i = 0; i < n[k]; i++) x ^= f[k][i];
+    f[k][n[k]++] = x;
+  }
+  portENTER_CRITICAL(&emuMux);
+  memcpy(emuFrame, f, sizeof f);
+  memcpy(emuLen, n, sizeof n);
+  portEXIT_CRITICAL(&emuMux);
+}
+
+static void emuSave() {
+  prefs.putBytes("emu", &emu, sizeof emu);
+  emuBuild();
+}
+
+static void IRAM_ATTR busEdgeIsr() {
+  uint32_t now = micros();
+  // an ID's start bit: the first falling edge after a silence longer than a byte
+  if (emu.on && !emuState && now - emuPrevEdge > 12000 && !(REG_READ(GPIO_IN_REG) & BIT(BUS_RX_PIN))) {
+    emuStart = now;
+    emuState = 1;
+  } else if (emuState == 2 && emuWait && !(REG_READ(GPIO_IN_REG) & BIT(BUS_RX_PIN))) {
+    // the unit's start bit: start ours with it
+    REG_WRITE(GPIO_OUT_W1TC_REG, BIT(BUS_TX_PIN));
+    emuByteT = now;
+    emuWait = false;
+    emuSynced++;
+  }
+  emuPrevEdge = now;
+  edgeT[edgeHead % EDGE_RING] = now;
+  edgeHead++;
+  busEdges++;
+}
+
+// One line per burst of edges (a frame): seconds since boot, µs of silence
+// before it, µs from first to last edge, edge count, bytes, bit length in ns
+// (from falling edges inside each byte, so neither a stretched low level nor
+// idle between bytes biases it), how much longer each low run inside a byte
+// is than that (ns), and the idle between bytes beyond one stop bit (µs).
+// The first edge after a silence is a start bit; an edge more than 9.5 bits
+// after the current start bit is the next start bit.
+static void timFrame(const uint32_t *t, int n, uint32_t gap) {
+  if (n < 3) return;
+  double nom = 1e6 / busBaud, sumDt = 0, sumBits = 0, idle = 0;
+  int bytes = 1, s = 0;
+  for (int i = 1; i < n; i++) {
+    double dt = (double)(t[i] - t[s]);
+    if (dt > 9.5 * nom) { idle += dt - 10 * nom; bytes++; s = i; continue; }
+    if (!((i - s) & 1)) { sumDt += dt; sumBits += (double)lround(dt / nom); }
+  }
+  if (sumBits < 1) return;
+  double bit = sumDt / sumBits, resLo = 0;
+  int nLo = 0;
+  s = 0;
+  for (int i = 1; i < n; i++) {
+    if ((double)(t[i] - t[s]) > 9.5 * nom) { s = i; continue; }
+    if ((i - s) & 1) {
+      double dt = (double)(t[i] - t[i - 1]);
+      resLo += dt - lround(dt / nom) * bit;
+      nLo++;
+    }
+  }
+  char line[96];
+  int p = snprintf(line, sizeof line, "%6lu.%03lu %6lu %6lu %3d %2d %7.1f %+6.0f %+7.1f\n",
+                   (unsigned long)(t[0] / 1000000), (unsigned long)(t[0] / 1000 % 1000),
+                   (unsigned long)gap, (unsigned long)(t[n - 1] - t[0]), n, bytes,
+                   bit * 1000, nLo ? resLo * 1000 / nLo : 0.0,
+                   bytes > 1 ? idle / (bytes - 1) : 0.0);
+  ringPut(timLog, (const uint8_t *)line, p);
+}
+
+// The same frame byte by byte, to see whether one frame has two senders (for
+// example the unit sending the ID as a poll and the VSC the data): seconds
+// since boot, µs of silence before it, then per byte its bit length in ns
+// (from falling edges inside the byte, "---" if it has none) and, after "/",
+// the µs from its start bit to the next byte's start bit beyond 10 nominal bits.
+static void byteFrame(const uint32_t *t, int n, uint32_t gap) {
+  if (n < 3) return;
+  double nom = 1e6 / busBaud;
+  char line[256];
+  int p = snprintf(line, sizeof line, "%6lu.%03lu %6lu",
+                   (unsigned long)(t[0] / 1000000), (unsigned long)(t[0] / 1000 % 1000),
+                   (unsigned long)gap);
+  int s = 0;
+  while (s < n && p < (int)sizeof line - 24) {
+    int e = s + 1;
+    double sumDt = 0, sumBits = 0;
+    for (; e < n && (double)(t[e] - t[s]) <= 9.5 * nom; e++)
+      if (!((e - s) & 1)) { sumDt += (double)(t[e] - t[s]); sumBits += (double)lround((t[e] - t[s]) / nom); }
+    if (sumBits >= 1) p += snprintf(line + p, sizeof line - p, "  %4.0f", sumDt / sumBits * 1000);
+    else p += snprintf(line + p, sizeof line - p, "   ---");
+    if (e < n) p += snprintf(line + p, sizeof line - p, "/%+4.0f", (double)(t[e] - t[s]) - 10 * nom);
+    s = e;
+  }
+  line[p++] = '\n';
+  if (byteLog) ringPut(*byteLog, (const uint8_t *)line, p);
+}
+
+// Collects edges from the ring into frames, split at EDGE_GAP_US of silence.
+static void timPoll() {
+  static uint32_t tail = 0, prevEnd = 0;
+  static uint32_t t[400];
+  static int n = 0;
+  uint32_t head = edgeHead;
+  if (head - tail > EDGE_RING) tail = head - EDGE_RING;   // overrun: skip ahead
+  for (; tail != head; tail++) {
+    uint32_t e = edgeT[tail % EDGE_RING];
+    if (n && e - t[n - 1] > EDGE_GAP_US) {
+      timFrame(t, n, prevEnd ? t[0] - prevEnd : 0);
+      byteFrame(t, n, prevEnd ? t[0] - prevEnd : 0);
+      prevEnd = t[n - 1];
+      n = 0;
+    }
+    if (n < 400) t[n++] = e;
+  }
+  if (n && micros() - t[n - 1] > EDGE_GAP_US) {
+    timFrame(t, n, prevEnd ? t[0] - prevEnd : 0);
+    byteFrame(t, n, prevEnd ? t[0] - prevEnd : 0);
+    prevEnd = t[n - 1];
+    n = 0;
+  }
+}
+
 // Runs in its own task so frame gaps are timed even while the web server is
 // busy sending a log. Complete frames go to loop() through busQueue.
 static void busTask(void *) {
@@ -119,6 +358,7 @@ static void busTask(void *) {
   f.len = 0;
   uint32_t last = 0;
   for (;;) {
+    timPoll();
     int c = Serial1.read();
     uint32_t now = millis();
     if (c < 0) {
@@ -142,6 +382,46 @@ static void busTask(void *) {
   }
 }
 
+// The unit's own frames, decoded for MQTT while the VSC is emulated (docs/protocol.md):
+// 84 = fault flags p8/p9 (p9 0x08 = bypass), A1 = extract and intake temperature,
+// DC = humidity. Frames with a bad checksum are ignored.
+struct BusState {
+  uint32_t t84, tA1, tDC;   // millis() of the last good frame, 0 = none yet
+  uint8_t p8, p9;
+  int ext, in, hum;
+};
+static BusState bus;
+static bool busChanged = false;   // p8/p9 changed: publish now
+
+static int busTemp(uint8_t b) {   // p5/p16: >>1, signed 7 bit, -63 = sensor fault
+  int v = rev8(b) >> 1;
+  return v & 0x40 ? v - 128 : v;
+}
+
+static void busParse(const BusFrame &f) {
+  uint8_t d[BUS_FRAME], x = 0;
+  for (int i = 0; i < f.len; i++) {
+    d[i] = busRev ? f.d[i] : rev8(f.d[i]);
+    x ^= d[i];
+  }
+  if (x != 0xD5) return;
+  uint32_t now = millis();
+  if (d[0] == 0x84 && f.len == 4) {
+    uint8_t p8 = rev8(d[1]), p9 = rev8(d[2]);
+    if (!bus.t84 || p8 != bus.p8 || p9 != bus.p9) busChanged = true;
+    bus.p8 = p8;
+    bus.p9 = p9;
+    bus.t84 = now;
+  } else if (d[0] == 0xA1 && f.len == 7) {
+    bus.ext = busTemp(d[1]);
+    bus.in = busTemp(d[3]);
+    bus.tA1 = now;
+  } else if (d[0] == 0xDC && f.len == 4) {
+    bus.hum = d[1] ^ 0x7F;   // p18: same as rev8 >> 1, active low
+    bus.tDC = now;
+  }
+}
+
 // "  12.345  +700  3B C2 54 06": seconds since boot, ms since the previous frame, bytes
 static void busDrain() {
   static uint32_t prevT = 0;
@@ -152,6 +432,7 @@ static void busDrain() {
                      (unsigned long)(f.t / 1000), (unsigned long)(f.t % 1000),
                      prevT ? (long)(f.t - prevT) : 0L);
     prevT = f.t;
+    busParse(f);
     for (int i = 0; i < f.len; i++) p += snprintf(line + p, sizeof line - p, " %02X", f.d[i]);
     line[p++] = '\n';
     ringPut(busLog, (const uint8_t *)line, p);
@@ -346,16 +627,24 @@ static void mqEvent(void *, esp_event_base_t, int32_t id, void *data) {
   }
 }
 
-// vscAvty: the entity also needs the VSC to answer (vsc/vsc_status), not only the ESP online.
-static void mqDiscovery(const char *comp, const char *key, const char *name, const char *extra, bool vscAvty = true) {
-  char topic[80], j[768];
+// Availability: AV_ESP needs only the ESP online. AV_UNIT also needs the unit to answer
+// (vsc/vsc_status: the VSC console, or the unit's frames while the VSC is emulated).
+// AV_CONSOLE is for what only the VSC's console has (vsc/console_status), AV_EMU for what
+// only the emulation has (vsc/emu_status).
+enum { AV_ESP, AV_UNIT, AV_CONSOLE, AV_EMU };
+static void mqDiscovery(const char *comp, const char *key, const char *name, const char *extra, int avty = AV_UNIT) {
+  char topic[80], j[900];
   snprintf(topic, sizeof topic, "homeassistant/%s/vsc_bridge/%s/config", comp, key);
   snprintf(j, sizeof j,
            "{\"name\":\"%s\",\"uniq_id\":\"vsc_bridge_%s\",\"obj_id\":\"mrxbox_%s\",%s,%s,"
            "\"dev\":{\"ids\":[\"vsc_bridge\"],\"name\":\"MRXBOX\",\"mf\":\"Nuaire\",\"mdl\":\"MRXBOX VSC\"}}",
            name, key, key,
-           vscAvty ? "\"avty\":[{\"t\":\"" MQ_BASE "/status\"},{\"t\":\"" MQ_BASE "/vsc_status\"}],\"avty_mode\":\"all\""
-                   : "\"avty_t\":\"" MQ_BASE "/status\"",
+           avty == AV_ESP ? "\"avty_t\":\"" MQ_BASE "/status\""
+           : avty == AV_UNIT ? "\"avty\":[{\"t\":\"" MQ_BASE "/status\"},{\"t\":\"" MQ_BASE "/vsc_status\"}],\"avty_mode\":\"all\""
+           : avty == AV_CONSOLE ? "\"avty\":[{\"t\":\"" MQ_BASE "/status\"},{\"t\":\"" MQ_BASE "/vsc_status\"},"
+                                  "{\"t\":\"" MQ_BASE "/console_status\"}],\"avty_mode\":\"all\""
+           : "\"avty\":[{\"t\":\"" MQ_BASE "/status\"},{\"t\":\"" MQ_BASE "/vsc_status\"},"
+             "{\"t\":\"" MQ_BASE "/emu_status\"}],\"avty_mode\":\"all\"",
            extra);
   mqPub(topic, j);
 }
@@ -365,6 +654,235 @@ static void mqVsc(bool online) {
   mqVscOnline = online;
   mqPub(MQ_BASE "/vsc_status", online ? "online" : "offline");
   if (!online) mqPub(MQ_BASE "/comms", "OFF");
+}
+
+// Emulation turned on or off: what HA shows comes from the other source now, so it stays
+// unavailable until that source answers (the unit's frames, or a console poll).
+static void emuSwitch(bool on) {
+  if (on == emu.on) return;
+  emu.on = on;
+  emuSave();
+  mqVsc(false);
+  mqNoReply = 0;
+  mqLastPoll = 0;
+  mqAnnounce = true;
+}
+
+// ---- MQTT while the VSC is emulated ----
+// With emu.on the controls go to the emulated VSC's answers (88/8A speed, AE modes and
+// setpoints, C5 airflow) and the state comes from those and from the unit's own frames.
+// The console isn't polled. Run and filter hours are counted here, as es-lcd does, while
+// the unit answers.
+static const uint8_t AIR_C5[6] = {2, 3, 0, 4, 5, 1};   // AIR_KEY index -> emu.air (C5 order)
+#define EMU_PUB_MS  20000
+#define EMU_BUS_MS  5000    // no good 84 frame for this long = no communications
+#define EMU_SAVE_MS 900000  // run/filter minutes to flash every 15 min
+static bool mqEmuDirty = true;
+static uint32_t emuRunMin, emuFiltMin;
+
+static void emuTmSave();
+
+static void emuHoursSave() {
+  prefs.putUInt("erun", emuRunMin);
+  prefs.putUInt("efilt", emuFiltMin);
+  emuTmSave();   // and the minutes left on the timers
+}
+
+static bool emuComms() { return emu.on && bus.t84 && millis() - bus.t84 < EMU_BUS_MS; }
+
+// Count a minute of running while the unit answers; save now and then.
+static void emuHours() {
+  static uint32_t minT = millis(), saveT = millis();
+  uint32_t now = millis();
+  if (now - minT < 60000) return;
+  minT += 60000;
+  if (!emuComms()) return;
+  emuRunMin++;
+  emuFiltMin++;
+  if (now - saveT >= EMU_SAVE_MS) {
+    saveT = now;
+    emuHoursSave();
+  }
+}
+
+// The VSC's own timers. es-lcd counts these down and only the resulting speed and mode bits
+// reach the bus, so the emulation runs them too: speed 3, night, holiday and the bypass
+// On/Off override fall back when their time is up. A length of 0 means no limit, as when
+// the VSC is in HA mode. Starting the bypass override cancels night, holiday and rising
+// boost, as es-lcd does.
+enum { TM_BOOST, TM_NIGHT, TM_HOLIDAY, TM_BYPASS, TM_N };
+static const char *const TM_KEY[TM_N] = {"boost_min", "night_h", "holiday_d", "bypass_h"};
+static const uint8_t TM_MIN[TM_N] = {1, 4, 1, 1}, TM_MAX[TM_N] = {59, 8, 21, 12};   // or 0
+static const uint16_t TM_UNIT[TM_N] = {1, 60, 1440, 60};   // minutes per step
+static uint8_t emuTmLen[TM_N];     // lengths in TM_UNIT steps; 0 = no limit
+static uint32_t emuTmLeft[TM_N];   // minutes left; 0 = not running
+static uint8_t emuPrevSpeed = 1;   // speed to go back to when speed 3 ends
+static uint8_t tmSpeed, tmMode;    // emu.speed and emu.mode as the timers last saw them
+
+static void emuTmSave() {
+  prefs.putBytes("etlen", emuTmLen, sizeof emuTmLen);
+  prefs.putBytes("etleft", emuTmLeft, sizeof emuTmLeft);
+  prefs.putUChar("eprev", emuPrevSpeed);
+}
+
+static void emuTmLoad() {
+  if (prefs.getBytesLength("etlen") == sizeof emuTmLen) prefs.getBytes("etlen", emuTmLen, sizeof emuTmLen);
+  if (prefs.getBytesLength("etleft") == sizeof emuTmLeft) prefs.getBytes("etleft", emuTmLeft, sizeof emuTmLeft);
+  emuPrevSpeed = constrain(prefs.getUChar("eprev", 1), 1, 2);
+  tmSpeed = emu.speed;   // a timer left running before a restart carries on
+  tmMode = emu.mode;
+}
+
+static bool emuTmValid(int i, int v) { return v == 0 || (v >= TM_MIN[i] && v <= TM_MAX[i]); }
+
+static void emuTmRun(int i, bool run) {
+  emuTmLeft[i] = run && emuTmLen[i] ? (uint32_t)emuTmLen[i] * TM_UNIT[i] : 0;
+}
+
+// Called from loop(): start or stop the timers on any change of speed or modes (from HA,
+// the web page or a timer), and count them down once a minute.
+static void emuTimers() {
+  static uint32_t minT = millis();
+  if (!emu.on) {
+    minT = millis();
+    tmSpeed = emu.speed;
+    tmMode = emu.mode;
+    return;
+  }
+  bool changed = false;
+  if ((tmMode & 0x01) && !(emu.mode & 0x01) && (~emu.mode & 0x0E)) {
+    emu.mode |= 0x0E;   // bypass override started: night, holiday and rising boost off
+    changed = true;
+  }
+  if (emu.speed != tmSpeed) {
+    if (emu.speed == 3) emuPrevSpeed = tmSpeed;
+    emuTmRun(TM_BOOST, emu.speed == 3);
+  }
+  uint8_t ch = emu.mode ^ tmMode;
+  if (ch & 0x08) emuTmRun(TM_NIGHT, !(emu.mode & 0x08));
+  if (ch & 0x04) emuTmRun(TM_HOLIDAY, !(emu.mode & 0x04));
+  if (ch & 0x11) emuTmRun(TM_BYPASS, (emu.mode & 0x11) != 0x11);
+  bool started = emu.speed != tmSpeed || (ch & 0x1D);
+  if (millis() - minT >= 60000) {
+    minT += 60000;
+    for (int i = 0; i < TM_N; i++) {
+      if (!emuTmLeft[i]) continue;
+      mqEmuDirty = true;   // HA's time left, once a minute
+      if (--emuTmLeft[i]) continue;
+      if (i == TM_BOOST) emu.speed = emuPrevSpeed;
+      else if (i == TM_NIGHT) emu.mode |= 0x08;
+      else if (i == TM_HOLIDAY) emu.mode |= 0x04;
+      else emu.mode |= 0x11;
+      changed = true;
+    }
+  }
+  tmSpeed = emu.speed;
+  tmMode = emu.mode;
+  if (changed) emuSave();
+  if (changed || started) {
+    emuTmSave();
+    mqEmuDirty = true;
+  }
+}
+
+// {"boost_min_left":0,...,"text":"Night 5 h 59 min, Bypass 12 min"} or "text":"None running"
+static String emuTmJson() {
+  static const char *const name[TM_N] = {"Speed 3", "Night", "Holiday", "Bypass"};
+  String txt, j = "{";
+  for (int i = 0; i < TM_N; i++) {
+    uint32_t m = emuTmLeft[i];
+    j += String("\"") + TM_KEY[i] + "_left\":" + m + ",";
+    if (!m) continue;
+    if (txt.length()) txt += ", ";
+    txt += name[i];
+    if (m >= 1440) txt += String(" ") + m / 1440 + " d";
+    if (m % 1440 >= 60) txt += String(" ") + m % 1440 / 60 + " h";
+    if (m % 60 || m < 60) txt += String(" ") + m % 60 + " min";
+  }
+  return j + "\"text\":\"" + (txt.length() ? txt : "None running") + "\"}";
+}
+
+static void mqEmuPub(bool comms) {
+  mqVsc(comms);
+  mqPub(MQ_BASE "/comms", comms ? "ON" : "OFF");
+  mqPub(MQ_BASE "/speed", String(emu.speed).c_str());
+  mqPub(MQ_BASE "/bypass", !(emu.mode & 0x01) ? "On" : !(emu.mode & 0x10) ? "Off" : "Auto");
+  mqPub(MQ_BASE "/bypass_temp", String(emu.bypassSp).c_str());
+  mqPub(MQ_BASE "/humidity_sp", String(emu.humSp).c_str());
+  mqPub(MQ_BASE "/frost_sp", String(-(int)emu.frost).c_str());
+  mqPub(MQ_BASE "/night", emu.mode & 0x08 ? "OFF" : "ON");
+  mqPub(MQ_BASE "/holiday", emu.mode & 0x04 ? "OFF" : "ON");
+  mqPub(MQ_BASE "/rising_boost", emu.mode & 0x02 ? "OFF" : "ON");
+  for (int i = 0; i < 6; i++) {
+    char topic[24];
+    snprintf(topic, sizeof topic, MQ_BASE "/%s", AIR_KEY[i]);
+    mqPub(topic, String(emu.air[AIR_C5[i]]).c_str());
+  }
+  for (int i = 0; i < TM_N; i++) {
+    char topic[24];
+    snprintf(topic, sizeof topic, MQ_BASE "/%s", TM_KEY[i]);
+    mqPub(topic, String(emuTmLen[i]).c_str());
+  }
+  mqPub(MQ_BASE "/timers", emuTmJson().c_str());
+  mqPub(MQ_BASE "/run_hours", String(emuRunMin / 60).c_str());
+  mqPub(MQ_BASE "/filter_hours", String(emuFiltMin / 60).c_str());
+  mqPub(MQ_BASE "/filter_change", emuFiltMin / 60 > 8759 ? "ON" : "OFF");
+  uint32_t now = millis();
+  bool t = comms && bus.tA1 && now - bus.tA1 < EMU_BUS_MS, h = comms && bus.tDC && now - bus.tDC < EMU_BUS_MS;
+  mqPub(MQ_BASE "/temp_extract", t && bus.ext != -63 ? String(bus.ext).c_str() : "None");
+  mqPub(MQ_BASE "/temp_intake", t && bus.in != -63 ? String(bus.in).c_str() : "None");
+  mqPub(MQ_BASE "/humidity", h && bus.hum > 0 && bus.hum < 127 ? String(bus.hum).c_str() : "None");
+  mqPub(MQ_BASE "/fan_running", comms ? String(emu.speed).c_str() : "None");
+  mqPub(MQ_BASE "/bypass_state", !comms ? "None" : (bus.p9 & 0x08) ? "ON" : "OFF");
+  for (int i = 0; i < 6; i++) {
+    char topic[40];
+    snprintf(topic, sizeof topic, MQ_BASE "/%s", FAULT_KEY[i]);
+    int b = FAULT_BYTE[i] == 8 ? bus.p8 : bus.p9;
+    mqPub(topic, !comms ? "None" : (b & FAULT_BIT[i]) ? "OFF" : "ON");
+  }
+}
+
+static void mqEmuLoop() {
+  static uint32_t pubT = 0;
+  bool comms = emuComms();
+  if (comms != mqVscOnline || busChanged) mqEmuDirty = true;
+  busChanged = false;
+  if (!mqEmuDirty && millis() - pubT < EMU_PUB_MS) return;
+  mqEmuDirty = false;
+  pubT = millis();
+  mqEmuPub(comms);
+}
+
+// A command from HA while the VSC is emulated: change the answers, then publish.
+static void mqEmuHandle(const String &t, const String &d) {
+  int v = (int)d.toFloat();
+  bool on = d == "ON", sw = on || d == "OFF";
+  if (t == MQ_BASE "/speed/set" && v >= 1 && v <= 3) emu.speed = v;
+  else if (t == MQ_BASE "/bypass/set" && (d == "Auto" || d == "On" || d == "Off"))
+    emu.mode = (emu.mode | 0x11) & ~(d == "On" ? 0x01 : d == "Off" ? 0x10 : 0);
+  else if (t == MQ_BASE "/bypass_temp/set" && v >= 15 && v <= 30) emu.bypassSp = v;
+  else if (t == MQ_BASE "/humidity_sp/set" && v >= 50 && v <= 85) emu.humSp = v;
+  else if (t == MQ_BASE "/frost_sp/set" && v >= -5 && v <= 0) emu.frost = -v;
+  else if (sw && (t == MQ_BASE "/night/set" || t == MQ_BASE "/holiday/set" || t == MQ_BASE "/rising_boost/set")) {
+    uint8_t bit = t == MQ_BASE "/night/set" ? 0x08 : t == MQ_BASE "/holiday/set" ? 0x04 : 0x02;
+    emu.mode = on ? emu.mode & ~bit : emu.mode | bit;
+  } else if (t == MQ_BASE "/filter_reset/set") {
+    emuFiltMin = 0;
+    emuHoursSave();
+  } else if (t.startsWith(MQ_BASE "/air_") && t.endsWith("/set") && v >= 1 && v <= 100) {
+    for (int i = 0; i < 6; i++)
+      if (t == String(MQ_BASE "/") + AIR_KEY[i] + "/set") emu.air[AIR_C5[i]] = v;
+  } else {
+    for (int i = 0; i < TM_N; i++)
+      if (t == String(MQ_BASE "/") + TM_KEY[i] + "/set" && emuTmValid(i, v)) {
+        emuTmLen[i] = v;   // a running timer keeps its time; the length applies from the next start
+        emuTmSave();
+      }
+    mqEmuDirty = true;   // and put HA back to what we have
+    return;
+  }
+  emuSave();
+  mqEmuDirty = true;
 }
 
 static void mqAnnounceAll() {
@@ -378,10 +896,10 @@ static void mqAnnounceAll() {
   mqDiscovery("binary_sensor", "bypass_state", "Bypass active",
               "\"stat_t\":\"" MQ_BASE "/bypass_state\",\"ic\":\"mdi:valve-open\"");
   mqDiscovery("switch", "debug", "Debug logging",
-              "\"stat_t\":\"" MQ_BASE "/debug\",\"cmd_t\":\"" MQ_BASE "/debug/set\",\"ent_cat\":\"config\",\"ic\":\"mdi:text-box-search\"");
+              "\"stat_t\":\"" MQ_BASE "/debug\",\"cmd_t\":\"" MQ_BASE "/debug/set\",\"ent_cat\":\"config\",\"ic\":\"mdi:text-box-search\"", AV_CONSOLE);
   mqDiscovery("sensor", "debug_log", "Debug log",
               "\"stat_t\":\"" MQ_BASE "/log_batch\",\"val_tpl\":\"{{ value_json.seq }}\",\"json_attr_t\":\"" MQ_BASE "/log_batch\","
-              "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:text-long\"", false);
+              "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:text-long\"", AV_ESP);
   mqDiscovery("sensor", "humidity", "Humidity",
               "\"stat_t\":\"" MQ_BASE "/humidity\",\"dev_cla\":\"humidity\",\"stat_cla\":\"measurement\",\"unit_of_meas\":\"%\"");
   mqDiscovery("sensor", "temp_extract", "Extract air temperature",
@@ -391,7 +909,7 @@ static void mqAnnounceAll() {
   mqDiscovery("sensor", "fan_running", "Running fan speed",
               "\"stat_t\":\"" MQ_BASE "/fan_running\",\"ic\":\"mdi:fan-auto\"");
   mqDiscovery("binary_sensor", "comms", "Communication with unit",
-              "\"stat_t\":\"" MQ_BASE "/comms\",\"dev_cla\":\"connectivity\",\"ent_cat\":\"diagnostic\"", false);
+              "\"stat_t\":\"" MQ_BASE "/comms\",\"dev_cla\":\"connectivity\",\"ent_cat\":\"diagnostic\"", AV_ESP);
   for (int i = 0; i < 6; i++) {
     char extra[200];
     snprintf(extra, sizeof extra, "\"stat_t\":\"" MQ_BASE "/%s\",\"dev_cla\":\"problem\",\"ent_cat\":\"diagnostic\"", FAULT_KEY[i]);
@@ -408,7 +926,7 @@ static void mqAnnounceAll() {
   }
   mqDiscovery("number", "screen_timeout", "Screen timeout",
               "\"stat_t\":\"" MQ_BASE "/screen_timeout\",\"cmd_t\":\"" MQ_BASE "/screen_timeout/set\",\"min\":0,\"max\":120,\"step\":1,"
-              "\"unit_of_meas\":\"min\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:monitor-off\"");
+              "\"unit_of_meas\":\"min\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:monitor-off\"", AV_CONSOLE);
   mqDiscovery("sensor", "run_hours", "Run hours",
               "\"stat_t\":\"" MQ_BASE "/run_hours\",\"dev_cla\":\"duration\",\"stat_cla\":\"total_increasing\",\"unit_of_meas\":\"h\","
               "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:timer-outline\"");
@@ -430,8 +948,33 @@ static void mqAnnounceAll() {
   mqDiscovery("switch", "holiday", "Holiday mode",
               "\"stat_t\":\"" MQ_BASE "/holiday\",\"cmd_t\":\"" MQ_BASE "/holiday/set\",\"ic\":\"mdi:bag-suitcase\"");
   mqDiscovery("sensor", "clock", "Clock",
-              "\"stat_t\":\"" MQ_BASE "/clock\",\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:clock-outline\"");
+              "\"stat_t\":\"" MQ_BASE "/clock\",\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:clock-outline\"", AV_CONSOLE);
+  mqDiscovery("switch", "rising_boost", "Rising humidity boost",
+              "\"stat_t\":\"" MQ_BASE "/rising_boost\",\"cmd_t\":\"" MQ_BASE "/rising_boost/set\",\"ent_cat\":\"config\","
+              "\"ic\":\"mdi:water-plus\"", AV_EMU);
+  static const char *const tmName[TM_N] = {"Speed 3 time limit", "Night mode length", "Holiday length",
+                                            "Bypass override length"};
+  static const char *const tmUnit[TM_N] = {"min", "h", "d", "h"};
+  static const char *const tmIcon[TM_N] = {"fan-clock", "weather-night", "bag-suitcase", "valve"};
+  for (int i = 0; i < TM_N; i++) {
+    char extra[280];
+    snprintf(extra, sizeof extra,
+             "\"stat_t\":\"" MQ_BASE "/%s\",\"cmd_t\":\"" MQ_BASE "/%s/set\",\"min\":0,\"max\":%d,\"step\":1,"
+             "\"unit_of_meas\":\"%s\",\"mode\":\"box\",\"ent_cat\":\"config\",\"ic\":\"mdi:%s\"",
+             TM_KEY[i], TM_KEY[i], TM_MAX[i], tmUnit[i], tmIcon[i]);
+    mqDiscovery("number", TM_KEY[i], tmName[i], extra, AV_EMU);
+  }
+  mqDiscovery("sensor", "timers", "Time left",
+              "\"stat_t\":\"" MQ_BASE "/timers\",\"val_tpl\":\"{{ value_json.text }}\","
+              "\"json_attr_t\":\"" MQ_BASE "/timers\",\"ic\":\"mdi:timer-sand\"", AV_EMU);
+  mqDiscovery("switch", "emulation", "VSC emulation",
+              "\"stat_t\":\"" MQ_BASE "/emulation\",\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:chip\","
+              "\"cmd_t\":\"" MQ_BASE "/emulation/set\"", AV_ESP);
   mqPub(MQ_BASE "/status", "online");
+  mqPub(MQ_BASE "/console_status", emu.on ? "offline" : "online");
+  mqPub(MQ_BASE "/emu_status", emu.on ? "online" : "offline");
+  mqPub(MQ_BASE "/emulation", emu.on ? "ON" : "OFF");
+  mqEmuDirty = true;
   mqPub(MQ_BASE "/vsc_status", mqVscOnline ? "online" : "offline");
   if (!mqVscOnline) mqPub(MQ_BASE "/comms", "OFF");
   if (mqBypassTemp) mqPub(MQ_BASE "/bypass_temp", String(mqBypassTemp).c_str());
@@ -443,6 +986,15 @@ static void mqHandle(const char *topic, const char *data) {
   String t = topic, d = data;
   if (t == "homeassistant/status") {
     if (d == "online") mqAnnounce = true;
+    return;
+  }
+  if (t == MQ_BASE "/emulation/set") {
+    if (d != "ON" && d != "OFF") return;
+    emuSwitch(d == "ON");
+    return;
+  }
+  if (emu.on) {
+    mqEmuHandle(t, d);
     return;
   }
   String cmd;
@@ -659,7 +1211,9 @@ static void mqLoop() {
     mqAnnounceAll();
   }
   if (mqLogBatch.length() && millis() - mqLogT >= MQ_LOG_MS) mqLogFlush();
-  if ((!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) && (!mqManual || millis() - mqManual >= 30000)) {
+  if (emu.on) {
+    mqEmuLoop();
+  } else if ((!mqLastPoll || millis() - mqLastPoll >= MQ_POLL_MS) && (!mqManual || millis() - mqManual >= 30000)) {
     mqLastPoll = millis();
     if (mqNoReply >= MQ_NO_REPLY) mqVsc(false);
     else mqNoReply++;
@@ -671,21 +1225,6 @@ static void mqLoop() {
     prefs.putInt("mqbtemp", mqBypassTemp);
   }
 }
-
-static const char MQTT_PAGE[] PROGMEM = R"HTML(<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VSC bridge MQTT</title>
-<style>body{font-family:sans-serif;margin:16px;background:#111;color:#ddd}input,button{font-size:16px;margin:4px 0;width:100%;max-width:320px}</style>
-</head><body><h3>VSC bridge: MQTT broker</h3>
-<p>Home Assistant finds the MRXBOX by MQTT discovery. Leave the host empty to turn MQTT off.</p>
-<form method="POST" action="/mqtt">
-<input name="host" placeholder="broker host or IP" autocomplete="off"><br>
-<input name="port" placeholder="port (1883)" autocomplete="off"><br>
-<input name="user" placeholder="user" autocomplete="off"><br>
-<input name="pass" type="password" placeholder="password"><br>
-<input name="tz" placeholder="time zone, POSIX TZ (empty keeps it; UK by default)" autocomplete="off"><br>
-<button>Save and restart</button></form>
-<p><a href="/" style="color:#9cf">Back to console</a></p></body></html>)HTML";
 
 static const char PAGE[] PROGMEM = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -709,7 +1248,7 @@ input,select,button{font-size:15px;margin:2px}
 <button onclick="post('/inv?on='+(inv?0:1))" id="invb">inv</button>
 <button onclick="post('/clear')">Clear log</button>
 <label><input type="checkbox" id="fol" checked>follow</label>
-<a href="/bus" style="color:#9cf">RS485 bus</a>
+<a href="/bus" style="color:#9cf">RS485 bus</a> <a href="/" style="color:#9cf">Setup</a>
 <form id="uf">Upload to unit: <input type="file" id="uff"> as <input id="uto" placeholder="/path/on/unit" autocomplete="off">
 <button>Upload</button> <span id="ust"></span></form>
 <script>
@@ -729,7 +1268,7 @@ function ctl(c){post('/ctrl?c='+c)}
 document.getElementById('f').onsubmit=e=>{e.preventDefault();
  const i=document.getElementById('line');
  post('/send?line='+encodeURIComponent(i.value));i.value='';};
-async function upd(){
+const upd=async()=>{
  try{
   const t=await (await fetch('/log')).text();
   l.textContent=t.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g,'');
@@ -763,12 +1302,12 @@ select,button{font-size:15px;margin:2px}
 <button onclick="post('/busrev?on='+(rev?0:1))" id="revb">rev</button>
 <button onclick="post('/busclear')">Clear</button>
 <label><input type="checkbox" id="fol" checked>follow</label>
-<a href="/" style="color:#9cf">Console</a>
+<a href="/console" style="color:#9cf">Console</a>
 <script>
 let rev=true;
 const l=document.getElementById('l');
 function post(u){return fetch(u,{method:'POST'}).then(upd)}
-async function upd(){
+const upd=async()=>{
  try{
   l.textContent=await (await fetch('/buslog')).text();
   if(document.getElementById('fol').checked)l.scrollTop=l.scrollHeight;
@@ -782,6 +1321,25 @@ async function upd(){
 }
 setInterval(upd,1000);upd();
 </script></body></html>)HTML";
+
+static void handleEmu() {
+  char j[800];
+  snprintf(j, sizeof j,
+           "{\"on\":%s,\"speed\":%d,\"mode\":\"%02X\",\"bypass_sp\":%d,\"humidity_sp\":%d,\"frost\":%d,"
+           "\"air\":[%d,%d,%d,%d,%d,%d],\"off_us\":%ld,\"gap_us\":%ld,"
+           "\"run_h\":%lu,\"filter_h\":%lu,\"comms\":%s,\"p8\":\"%02X\",\"p9\":\"%02X\",\"extract\":%d,\"intake\":%d,\"humidity\":%d,"
+           "\"tm_len\":[%d,%d,%d,%d],\"timers\":%s,"
+           "\"sent\":{\"88\":%lu,\"8A\":%lu,\"AE\":%lu,\"C5\":%lu},\"late\":%lu,\"synced\":%lu,\"own\":%lu}",
+           emu.on ? "true" : "false", emu.speed, emu.mode, emu.bypassSp, emu.humSp, emu.frost,
+           emu.air[0], emu.air[1], emu.air[2], emu.air[3], emu.air[4], emu.air[5],
+           (long)emuOffUs, (long)emuGapUs,
+           (unsigned long)(emuRunMin / 60), (unsigned long)(emuFiltMin / 60), emuComms() ? "true" : "false",
+           bus.p8, bus.p9, bus.ext, bus.in, bus.hum,
+           emuTmLen[0], emuTmLen[1], emuTmLen[2], emuTmLen[3], emuTmJson().c_str(),
+           (unsigned long)emuSent[0], (unsigned long)emuSent[1], (unsigned long)emuSent[2],
+           (unsigned long)emuSent[3], (unsigned long)emuLate, (unsigned long)emuSynced, (unsigned long)emuOwn);
+  web.send(200, "application/json", j);
+}
 
 static void handleStatus() {
   char j[420];
@@ -800,41 +1358,285 @@ static void handleStatus() {
   web.send(200, "application/json", j);
 }
 
-static const char WIFI_PAGE[] PROGMEM = R"HTML(<!doctype html>
+static const char SETUP_PAGE[] PROGMEM = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VSC bridge WiFi</title>
-<style>body{font-family:sans-serif;margin:16px;background:#111;color:#ddd}input,button{font-size:16px;margin:4px 0;width:100%;max-width:320px}</style>
-</head><body><h3>VSC bridge: WiFi setup</h3>
-<form method="POST" action="/wifi">
-<input name="ssid" placeholder="WiFi name (SSID)" autocomplete="off"><br>
-<input name="pass" type="password" placeholder="WiFi password"><br>
+<title>VSC bridge setup</title>
+<style>
+body{font-family:sans-serif;margin:0 auto;padding:8px 16px 24px;max-width:520px;background:#111;color:#ddd}
+h2{font-size:20px;margin:12px 0}h3{font-size:16px;margin:22px 0 6px;color:#9cf}
+table{border-collapse:collapse;width:100%;font-size:14px}td{padding:4px;border-bottom:1px solid #222;vertical-align:top}
+td:first-child{color:#999;width:38%}
+input,button{font-size:16px;box-sizing:border-box;width:100%;margin:4px 0;padding:7px;background:#1c1c1c;color:#ddd;border:1px solid #444;border-radius:4px}
+input[type=checkbox]{width:auto;margin-right:6px}
+button{background:#245;border-color:#368;cursor:pointer}button:disabled{opacity:.6}button.w{background:#422;border-color:#744}
+.ok{color:#8d8}.bad{color:#f99}.dim{color:#888;font-size:13px}a{color:#9cf}
+#nets div{padding:7px 4px;border-bottom:1px solid #222;cursor:pointer}#nets div:hover{background:#1c1c1c}
+</style></head><body>
+<h2>VSC bridge</h2>
+<h3>Status</h3><table id="st"><tr><td>Loading...</td></tr></table>
+<h3>WiFi</h3>
+<form method="POST" action="/wifi" id="wf">
+<button type="button" id="scan">Scan for networks</button><div id="nets"></div>
+<input name="ssid" id="ssid" placeholder="Network name (SSID)" maxlength="32" autocomplete="off" required>
+<input name="pass" id="wp" type="password" placeholder="Password" maxlength="64" autocomplete="new-password">
+<button>Save and join</button></form>
+<p class="dim">The bridge restarts and joins the network. Then open http://<span class="hn">vsc-bridge</span>.local/
+(or the address your router gives it). If it can't join within a minute, its setup network comes back.</p>
+<h3>MQTT (Home Assistant)</h3>
+<form method="POST" action="/mqtt">
+<input name="host" id="mh" placeholder="Broker host or IP (empty turns MQTT off)" maxlength="64" autocomplete="off">
+<input name="port" id="mp" placeholder="Port (1883)" inputmode="numeric" maxlength="5" autocomplete="off">
+<input name="user" id="mu" placeholder="User" maxlength="64" autocomplete="off">
+<input name="pass" id="mw" type="password" placeholder="Password" maxlength="64" autocomplete="new-password">
+<label class="dim"><input type="checkbox" name="nopass" value="1">No password</label>
+<input name="tz" id="tz" placeholder="Time zone, POSIX TZ" maxlength="64" autocomplete="off">
 <button>Save and restart</button></form>
-<p><a href="/" style="color:#9cf">Back to console</a></p></body></html>)HTML";
+<p class="dim">Home Assistant finds the MRXBOX by MQTT discovery.</p>
+<h3>Device</h3>
+<form method="POST" action="/setup/ap"><button>Start the setup network</button></form>
+<form method="POST" action="/reboot" onsubmit="return confirm('Restart the bridge?')"><button class="w">Restart</button></form>
+<p class="dim"><a href="/console">Console</a> &middot; <a href="/bus">RS485 bus</a> &middot; <a href="/emu">Emulation (JSON)</a></p>
+<script>
+const $=i=>document.getElementById(i);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const row=(k,v,c)=>`<tr><td>${k}</td><td class="${c||''}">${v}</td></tr>`;
+const dur=s=>{const d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0;return(d?d+' d ':'')+(d||h?h+' h ':'')+m+' min'};
+let filled=false;
+const upd=async()=>{
+ try{
+  const s=await(await fetch('/setup/status')).json(),w=s.wifi,a=s.ap,m=s.mqtt;
+  let h=row('WiFi',w.conn?`Connected to ${esc(w.ssid)}, ${w.rssi} dBm`:w.saved?`Not connected, trying ${esc(w.saved)}`:'Not set up',w.conn?'ok':'bad');
+  if(w.conn)h+=row('Address',`${w.ip}<br>${esc(w.host)}.local`);
+  h+=row('Setup network',a.on?`On: ${esc(w.host)}, ${a.clients} connected`:'Off');
+  h+=row('MQTT',!m.host?'Off':`${m.conn?'Connected to':'Not connected to'} ${esc(m.host)}:${m.port}`,m.host?(m.conn?'ok':'bad'):'');
+  h+=row('Unit (RS485)',s.bus.unit?'Talking':'No frames from the unit',s.bus.unit?'ok':'bad');
+  h+=row('Control',s.emu.on?`ESP in place of the VSC, speed ${s.emu.speed}`:`VSC console ${s.vsc?'online':'offline'}`);
+  h+=row('Uptime',dur(s.up))+row('Firmware',esc(s.fw))+row('Free memory',(s.heap/1024|0)+' KB');
+  $('st').innerHTML=h;
+  if(!filled){
+   filled=true;$('ssid').value=w.saved;$('mh').value=m.host;$('mp').value=m.port;$('mu').value=m.user;$('tz').value=m.tz;
+   if(w.saved)$('wp').placeholder='Password (empty keeps the saved one)';
+   if(m.pass)$('mw').placeholder='Password (empty keeps the saved one)';
+   document.querySelectorAll('.hn').forEach(e=>e.textContent=w.host);
+  }
+ }catch(e){$('st').innerHTML=row('Status','No answer from the bridge','bad')}
+}
+setInterval(upd,3000);upd();
+$('scan').onclick=async()=>{
+ const b=$('scan');b.disabled=true;b.textContent='Scanning...';
+ for(let i=0;i<20;i++){
+  try{const r=await(await fetch('/scan')).json();
+   if(r.nets){$('nets').innerHTML=r.nets.length?r.nets.map(n=>
+    `<div data-s="${esc(n.ssid)}">${esc(n.ssid)} <span class="dim">${n.rssi} dBm${n.open?', open':''}</span></div>`).join(''):
+    '<p class="dim">No networks found</p>';break}}catch(e){}
+  await new Promise(r=>setTimeout(r,1000));
+ }
+ b.disabled=false;b.textContent='Scan again';
+};
+$('nets').onclick=e=>{const d=e.target.closest('div[data-s]');if(d){$('ssid').value=d.dataset.s;$('wp').value='';$('wp').focus()}};
+</script></body></html>)HTML";
+
+// ---- setup network (access point with a captive portal) ----
+static DNSServer dns;
+static bool apOn = false;
+static uint32_t apIdleT;        // last time a phone was on the setup network
+static bool staPaused = false;  // stopped retrying the saved network while a phone is on ours
+static uint32_t rebootAt = 0;   // restart once the reply has gone out
+
+static void apStart() {
+  if (apOn) return;
+  WiFi.mode(WIFI_AP_STA);   // the station side keeps trying the saved network, and scans
+  WiFi.softAP(HOSTNAME, AP_PASS);
+  dns.setErrorReplyCode(DNSReplyCode::NoError);
+  dns.start(53, "*", WiFi.softAPIP());   // every name points here, so phones open the setup page
+  apOn = true;
+  apIdleT = millis();
+  Serial.printf("Setup network %s  http://%s/\n", HOSTNAME, WiFi.softAPIP().toString().c_str());
+}
+
+static void apStop() {
+  if (!apOn) return;
+  dns.stop();
+  WiFi.softAPdisconnect(true);
+  apOn = false;
+}
+
+static void staBegin() {
+  String ssid = prefs.getString("ssid", ""), pass = prefs.getString("pass", "");
+  if (ssid.length()) WiFi.begin(ssid.c_str(), pass.c_str());
+  staPaused = false;
+}
+
+static void startNetServices();
+
+// Called from loop(): the setup network, the BOOT button, and what starts once WiFi is up.
+static void wifiLoop() {
+  static uint32_t downT = millis(), btnT = 0;
+  static bool wasUp = false;
+  bool up = WiFi.status() == WL_CONNECTED;
+  if (up && !wasUp) startNetServices();
+  wasUp = up;
+  if (up) downT = millis();
+  else if (!apOn && millis() - downT > 60000) apStart();
+
+  if (!digitalRead(AP_BUTTON)) {
+    if (!btnT) btnT = millis();
+    else if (millis() - btnT > 3000) apStart();
+  } else {
+    btnT = 0;
+  }
+
+  if (!apOn) return;
+  dns.processNextRequest();
+  if (WiFi.softAPgetStationNum()) {
+    apIdleT = millis();
+    // While the saved network can't be joined, each retry moves the radio off our channel and
+    // drops the phone. Stop retrying while someone is on the setup network.
+    if (!up && !staPaused) {
+      WiFi.disconnect();
+      staPaused = true;
+    }
+  } else if (staPaused && millis() - apIdleT > 30000) {
+    staBegin();
+  }
+  if (up && millis() - apIdleT > 300000) apStop();
+}
+
+static String jsonStr(const String &v) {
+  String o = "\"";
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if ((uint8_t)c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+    else o += c;
+  }
+  return o + "\"";
+}
+
+static void handleSetupStatus() {
+  bool up = WiFi.status() == WL_CONNECTED;
+  String j = "{\"fw\":\"" FW_BUILD "\",\"up\":" + String(millis() / 1000) + ",\"heap\":" + String(ESP.getFreeHeap());
+  j += ",\"wifi\":{\"conn\":" + String(up ? "true" : "false") + ",\"ssid\":" + jsonStr(up ? WiFi.SSID() : String()) +
+       ",\"saved\":" + jsonStr(prefs.getString("ssid", "")) + ",\"ip\":\"" + (up ? WiFi.localIP().toString() : String()) +
+       "\",\"rssi\":" + String(up ? WiFi.RSSI() : 0) + ",\"host\":\"" HOSTNAME "\"}";
+  j += ",\"ap\":{\"on\":" + String(apOn ? "true" : "false") + ",\"clients\":" + String(apOn ? WiFi.softAPgetStationNum() : 0) + "}";
+  j += ",\"mqtt\":{\"host\":" + jsonStr(mqHost) + ",\"port\":" + String(prefs.getUInt("mqport", 1883)) +
+       ",\"user\":" + jsonStr(prefs.getString("mquser", "")) + ",\"pass\":" +
+       (prefs.getString("mqpass", "").length() ? "true" : "false") + ",\"conn\":" + (mqConnected ? "true" : "false") +
+       ",\"tz\":" + jsonStr(clockTz) + "}";
+  j += ",\"bus\":{\"unit\":" + String(bus.t84 && millis() - bus.t84 < EMU_BUS_MS ? "true" : "false") +
+       ",\"frames\":" + String(busFrames) + "}";
+  j += ",\"emu\":{\"on\":" + String(emu.on ? "true" : "false") + ",\"speed\":" + String(emu.speed) + "}";
+  j += ",\"vsc\":" + String(mqVscOnline ? "true" : "false") + "}";
+  web.send(200, "application/json", j);
+}
+
+// The scan runs in the background: the first GET starts it, later ones get the list.
+static void handleScan() {
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) { web.send(200, "application/json", "{\"scanning\":true}"); return; }
+  if (n < 0) {
+    WiFi.scanNetworks(true);
+    web.send(200, "application/json", "{\"scanning\":true}");
+    return;
+  }
+  String j = "{\"nets\":[";
+  int shown = 0;
+  for (int i = 0; i < n && shown < 30; i++) {
+    String ss = WiFi.SSID(i);
+    if (!ss.length()) continue;   // hidden network
+    bool dup = false;
+    for (int k = 0; k < n && !dup; k++)   // the same network on several access points: the strongest only
+      dup = k != i && WiFi.SSID(k) == ss && (WiFi.RSSI(k) > WiFi.RSSI(i) || (WiFi.RSSI(k) == WiFi.RSSI(i) && k < i));
+    if (dup) continue;
+    if (shown++) j += ",";
+    j += "{\"ssid\":" + jsonStr(ss) + ",\"rssi\":" + String(WiFi.RSSI(i)) +
+         ",\"open\":" + (WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "true" : "false") + "}";
+  }
+  WiFi.scanDelete();
+  web.send(200, "application/json", j + "]}");
+}
+
+static void sendDone(const String &msg) {
+  web.send(200, "text/html",
+           "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,"
+           "initial-scale=1\"><meta http-equiv=\"refresh\" content=\"20;url=/\"><title>VSC bridge</title><style>body{"
+           "font-family:sans-serif;margin:16px;background:#111;color:#ddd}a{color:#9cf}</style></head><body><p>" +
+               msg + "</p><p><a href=\"/\">Back to setup</a></p></body></html>");
+}
+
+// Captive portal: a phone on the setup network checks some address of its own (for example
+// /generate_204); anything not ours is sent to the setup page, which makes the phone show it.
+static void handleNotFound() {
+  String h = web.hostHeader();
+  if (apOn && h != WiFi.softAPIP().toString() && h != WiFi.localIP().toString() && h != HOSTNAME &&
+      h != HOSTNAME ".local") {
+    web.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
+    web.send(302, "text/plain", "");
+    return;
+  }
+  web.send(404, "text/plain", "not found");
+}
 
 static void setupWeb() {
-  web.on("/", HTTP_GET, [] { web.send_P(200, "text/html", PAGE); });
-  web.on("/wifi", HTTP_GET, [] { web.send_P(200, "text/html", WIFI_PAGE); });
+  web.on("/", HTTP_GET, [] { web.send_P(200, "text/html", SETUP_PAGE); });
+  web.on("/console", HTTP_GET, [] { web.send_P(200, "text/html", PAGE); });
+  web.on("/setup/status", HTTP_GET, handleSetupStatus);
+  web.on("/scan", HTTP_GET, handleScan);
+  auto toSetup = [] {
+    web.sendHeader("Location", "/", true);
+    web.send(302, "text/plain", "");
+  };
+  web.on("/wifi", HTTP_GET, toSetup);
+  web.on("/mqtt", HTTP_GET, toSetup);
   web.on("/wifi", HTTP_POST, [] {
-    prefs.putString("ssid", web.arg("ssid"));
-    prefs.putString("pass", web.arg("pass"));
-    web.send(200, "text/plain", "Saved. Restarting and joining the network...");
-    delay(500);
-    ESP.restart();
+    String ssid = web.arg("ssid");
+    ssid.trim();
+    if (!ssid.length() || ssid.length() > 32 || web.arg("pass").length() > 64) {
+      web.send(400, "text/plain", "network name 1-32 characters, password up to 64");
+      return;
+    }
+    // an empty password keeps the saved one for the same network; another network gets it as it is
+    if (web.arg("pass").length() || ssid != prefs.getString("ssid", "")) prefs.putString("pass", web.arg("pass"));
+    prefs.putString("ssid", ssid);
+    sendDone("Saved. The bridge is restarting to join the network. Put this phone or computer back on that "
+             "network, then open http://" HOSTNAME ".local/ or the address your router gives the bridge.");
+    rebootAt = millis();
   });
-  web.on("/mqtt", HTTP_GET, [] { web.send_P(200, "text/html", MQTT_PAGE); });
   web.on("/mqtt", HTTP_POST, [] {
-    prefs.putString("mqhost", web.arg("host"));
-    prefs.putUInt("mqport", web.arg("port").length() ? web.arg("port").toInt() : 1883);
+    long port = web.arg("port").length() ? web.arg("port").toInt() : 1883;
+    if (port < 1 || port > 65535) {
+      web.send(400, "text/plain", "port 1-65535");
+      return;
+    }
+    String host = web.arg("host");
+    host.trim();
+    prefs.putString("mqhost", host);
+    prefs.putUInt("mqport", port);
     prefs.putString("mquser", web.arg("user"));
-    prefs.putString("mqpass", web.arg("pass"));
+    if (web.hasArg("nopass")) prefs.putString("mqpass", "");
+    else if (web.arg("pass").length()) prefs.putString("mqpass", web.arg("pass"));   // empty keeps it
     if (web.arg("tz").length()) prefs.putString("tz", web.arg("tz"));
-    web.send(200, "text/plain", "Saved. Restarting...");
-    delay(500);
-    ESP.restart();
+    sendDone("Saved. Restarting...");
+    rebootAt = millis();
   });
+  web.on("/setup/ap", HTTP_POST, [] {   // as the BOOT button; on=0 stops it
+    if (web.arg("on") == "0") apStop();
+    else apStart();
+    sendDone(apOn ? "The setup network " HOSTNAME " is on. It goes off by itself 5 minutes after the last phone "
+                    "leaves it, while the bridge is on its WiFi."
+                  : "The setup network is off.");
+  });
+  web.on("/reboot", HTTP_POST, [] {
+    sendDone("Restarting...");
+    rebootAt = millis();
+  });
+  web.onNotFound(handleNotFound);
   web.on("/log", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", ringText(conLog)); });
   web.on("/bus", HTTP_GET, [] { web.send_P(200, "text/html", BUS_PAGE); });
   web.on("/buslog", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", ringText(busLog)); });
+  web.on("/bustiming", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", ringText(timLog)); });
+  web.on("/busbytes", HTTP_GET, [] { web.send(200, "text/plain; charset=utf-8", byteLog ? ringText(*byteLog) : String()); });
   web.on("/busbaud", HTTP_POST, [] {
     uint32_t b = web.arg("b").toInt();
     if (b >= 300 && b <= 115200) {
@@ -848,6 +1650,39 @@ static void setupWeb() {
     busRev = web.arg("on") == "1";
     prefs.putBool("busrev", busRev);
     web.send(200, "text/plain", "ok");
+  });
+  web.on("/emu", HTTP_GET, handleEmu);
+  web.on("/emu", HTTP_POST, [] {
+    if (web.hasArg("speed")) emu.speed = constrain(web.arg("speed").toInt(), 1, 3);
+    if (web.hasArg("mode")) emu.mode = (strtol(web.arg("mode").c_str(), nullptr, 16) & 0x7F) | 0x60;
+    if (web.hasArg("bsp")) emu.bypassSp = constrain(web.arg("bsp").toInt(), 0, 31);
+    if (web.hasArg("hsp")) emu.humSp = constrain(web.arg("hsp").toInt(), 0, 99);
+    if (web.hasArg("frost")) emu.frost = constrain(web.arg("frost").toInt(), 0, 15);
+    if (web.hasArg("air")) {
+      String a = web.arg("air");
+      for (int i = 0, p = 0; i < 6 && p >= 0; i++) {
+        emu.air[i] = constrain(a.substring(p).toInt(), 0, 100);
+        p = a.indexOf(',', p);
+        if (p >= 0) p++;
+      }
+    }
+    if (web.hasArg("off")) emuOffUs = web.arg("off").toInt();
+    if (web.hasArg("gap")) emuGapUs = web.arg("gap").toInt();
+    if (web.hasArg("lgap")) emuLastGapUs = web.arg("lgap").toInt();
+    for (int i = 0; i < TM_N; i++)
+      if (web.hasArg(TM_KEY[i]) && emuTmValid(i, web.arg(TM_KEY[i]).toInt())) {
+        emuTmLen[i] = web.arg(TM_KEY[i]).toInt();
+        emuTmSave();
+      }
+    if (web.hasArg("run") || web.hasArg("filt")) {   // hours, e.g. carried over from the VSC
+      if (web.hasArg("run")) emuRunMin = web.arg("run").toInt() * 60;
+      if (web.hasArg("filt")) emuFiltMin = web.arg("filt").toInt() * 60;
+      emuHoursSave();
+    }
+    mqEmuDirty = true;
+    emuSave();
+    if (web.hasArg("on")) emuSwitch(web.arg("on") == "1");
+    handleEmu();
   });
   web.on("/busclear", HTTP_POST, [] {
     busLog.head = 0;
@@ -936,25 +1771,31 @@ static void setupWeb() {
   web.begin();
 }
 
+// Joins the saved network, waiting up to 20 s so MQTT and NTP can start in setup(). If there is
+// none, the setup network starts now; if it can't be joined, wifiLoop() starts it after a minute
+// and the ESP keeps trying the saved network meanwhile.
 static void setupWifi() {
-  String ssid = prefs.getString("ssid", "");
-  String pass = prefs.getString("pass", "");
-  if (ssid.length()) {
-    WiFi.mode(WIFI_STA);
-    WiFi.setHostname(HOSTNAME);
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) delay(250);
+  pinMode(AP_BUTTON, INPUT_PULLUP);
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(HOSTNAME);
+  WiFi.setAutoReconnect(true);
+  if (!prefs.getString("ssid", "").length()) {
+    apStart();
+    return;
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("WiFi %s  IP %s\n", ssid.c_str(), WiFi.localIP().toString().c_str());
-  } else {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(HOSTNAME, AP_PASS);
-    Serial.printf("AP %s (password %s)  setup page http://%s/wifi\n",
-                  HOSTNAME, AP_PASS, WiFi.softAPIP().toString().c_str());
-  }
+  staBegin();
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) delay(250);
+  if (WiFi.status() == WL_CONNECTED) Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str());
+}
+
+// NTP and MQTT, the first time WiFi is up (at boot, or later if the network was down then).
+static void startNetServices() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  configTzTime(clockTz.c_str(), "pool.ntp.org", "time.google.com");
+  if (!mq) setupMqtt();
 }
 
 void setup() {
@@ -972,17 +1813,26 @@ void setup() {
   Serial1.setRxBufferSize(1024);
   Serial1.begin(busBaud, SERIAL_8N1, BUS_RX_PIN, -1);
   gpio_pullup_en((gpio_num_t)BUS_RX_PIN);   // idle high while nothing is connected
-  attachInterrupt(BUS_RX_PIN, []() IRAM_ATTR { busEdges++; }, CHANGE);
+  if (prefs.getBytesLength("emu") == sizeof emu) prefs.getBytes("emu", &emu, sizeof emu);
+  emuRunMin = prefs.getUInt("erun", 0);
+  emuTmLoad();
+  emuFiltMin = prefs.getUInt("efilt", 0);
+  emuBuild();
+  emuTimer = timerBegin(1000000);
+  timerAttachInterrupt(emuTimer, emuTick);
+  timerAlarm(emuTimer, 25, true, 0);
+  attachInterrupt(BUS_RX_PIN, busEdgeIsr, CHANGE);
+  byteLog = new Ring;
   busQueue = xQueueCreate(32, sizeof(BusFrame));
   xTaskCreatePinnedToCore(busTask, "bus", 4096, nullptr, 2, nullptr, 0);
 
-  setupWifi();
   clockTz = prefs.getString("tz", CLOCK_TZ);
-  if (WiFi.status() == WL_CONNECTED) configTzTime(clockTz.c_str(), "pool.ntp.org", "time.google.com");
+  mqHost = prefs.getString("mqhost", "");
+  setupWifi();
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.begin();
   setupWeb();
-  setupMqtt();
+  if (WiFi.status() == WL_CONNECTED) startNetServices();
   telnet.begin();
   telnet.setNoDelay(true);
   busServer.begin();
@@ -995,6 +1845,11 @@ static int iacState = 0;
 void loop() {
   ArduinoOTA.handle();
   web.handleClient();
+  wifiLoop();
+  if (rebootAt && millis() - rebootAt > 1000) {
+    emuHoursSave();
+    ESP.restart();
+  }
 
   if (telnet.hasClient()) {
     if (client && client.connected()) {
@@ -1032,6 +1887,8 @@ void loop() {
     mqConsole(buf, n);
   }
   upStep();
+  emuHours();
+  emuTimers();
   mqLoop();
 
   while (client && client.connected() && client.available()) {

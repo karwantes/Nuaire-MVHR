@@ -92,7 +92,7 @@ Later updates can go over WiFi: Tools → Port → network port `vsc-bridge`.
 ### WiFi
 
 1. Power the ESP from USB. On first boot it makes its own WiFi network **`vsc-bridge`**, password **`nuaire123`**.
-2. Join it from a phone or laptop and open `http://192.168.4.1/wifi`.
+2. Join it from a phone or laptop and open `http://192.168.4.1/` (most phones open it by themselves). Scan, pick your network and enter its password.
 3. Enter your 2.4 GHz WiFi name (SSID) and password, and save. The ESP restarts onto your network.
 4. Reconnect your phone or laptop to your normal WiFi.
 5. If the ESP can't join within 20 s (wrong password, out of range), the `vsc-bridge` network comes back so you can try again.
@@ -107,7 +107,7 @@ Later updates can go over WiFi: Tools → Port → network port `vsc-bridge`.
 
 ### MQTT on the ESP
 
-1. Open `http://vsc-bridge.local/mqtt`.
+1. Open `http://vsc-bridge.local/` and fill in the MQTT section.
 2. Enter the broker host from step 3 (address only), port `1883`, and the user and password you made. Save. The login is kept on the ESP only.
 3. Leave the host empty to turn MQTT off.
 
@@ -184,7 +184,7 @@ Discovery alone doesn't prove control. Check each of these:
 | Bridge page opens, but nothing in the log | The unit is powered. 0V is connected to GND on both sides of the module. The module has 3V3. You may have missed the boot: wait 20 s for a status line, or power-cycle the unit. VSC TX goes to the module's RS232 input. |
 | Garbage characters in the log | 115200 baud and **TTL (normal)** polarity. |
 | `login:` shows, but nothing after it | **TX on**. ESP GPIO17 to the module's TTL input, and the module's RS232 output to VSC RX. |
-| Status lines show, but no MRXBOX in HA | Broker host (address only, no `http://`), port 1883, user and password on `/mqtt`. The MQTT integration is set up in HA. |
+| Status lines show, but no MRXBOX in HA | Broker host (address only, no `http://`), port 1883, user and password in the MQTT section of `http://vsc-bridge.local/`. The MQTT integration is set up in HA. |
 | MRXBOX is in HA, but everything unavailable | The bridge isn't getting status lines. Check the rows above. |
 | `no VSC card found` | The card is in the reader and Windows sees it. Press `4` to scan again. A card that isn't a VSC card, or is damaged, isn't listed: see below. |
 | `ERROR:` during backup or convert | Stop. Keep the backup files and the message. Go to [Restore and recovery](#9-restore-and-recovery). |

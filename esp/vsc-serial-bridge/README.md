@@ -59,6 +59,7 @@ A second input listens to the bus between the VSC and the MRXBOX. Use a **3.3 V 
 - The ground link (blue to module GND) is required. Without it the receiver sees nothing.
 - The chip on the XY-485 is a MAX485 (a 5 V part) run at 3.3 V by the board's regulator. It works on my unit, but a MAX3485 is the in-spec part.
 - Tap in parallel with the VSC (wall box terminals or the bus pads on the VSC back). The VSC keeps working.
+- With the VSC powered off, the same module lets the bridge take the VSC's place on the bus (option 4, the **VSC emulation** switch in HA). That needs TXD on GPIO26. See [docs/option4-esp-replaces-vsc.md](../../docs/option4-esp-replaces-vsc.md).
 - **Never the red wire (+10 V).**
 - `/status` shows `bus_edges` and `bus_level`, which count level changes on GPIO25 at any baud rate. If edges stay at 0, the module isn't switching (check ground, then swap A/B).
 
@@ -66,8 +67,8 @@ A second input listens to the bus between the VSC and the MRXBOX. Use a **3.3 V 
 
 1. Arduino IDE with the ESP32 board package (Espressif `esp32`). Board: "ESP32 Dev Module".
 2. Flash over USB once. After that you can reflash over WiFi: in Arduino IDE pick the network port `vsc-bridge`, or from the command line run `espota.exe -i <ip> -p 3232 -f vsc-serial-bridge.ino.bin -r` (espota is in the esp32 core's `tools` folder).
-3. WiFi is set on the device, not in the code. It needs a 2.4 GHz network. On first boot the ESP starts its own network `vsc-bridge` (password `nuaire123`). Join it from a phone, open `http://192.168.4.1/wifi`, and enter your WiFi name and password. The ESP saves them and restarts onto your network.
-4. If it can't join the saved network within 20 s, it starts the `vsc-bridge` network again so you can fix the settings. You can change them any time at `/wifi`.
+3. WiFi is set on the device, not in the code. It needs a 2.4 GHz network. On first boot the ESP starts its own network `vsc-bridge` (password `nuaire123`). Join it from a phone; the setup page opens by itself (or open `http://192.168.4.1/`). Scan, pick your network and enter its password. The ESP saves them and restarts onto your network.
+4. If it can't reach the saved network for a minute, or you hold the BOOT button for 3 s, it starts the `vsc-bridge` network again so you can fix the settings. Once it is back on your network the `vsc-bridge` network turns off after 5 min unused. You can change the settings any time at `http://vsc-bridge.local/`, which also shows the bridge's status. The old console page is at `/console`.
 
 ## Use
 
@@ -83,7 +84,7 @@ The default is 115200 8N1, the usual DM355 console speed. If the log shows garba
 
 The bridge can put the MRXBOX into Home Assistant by MQTT discovery. It needs `logger/i2clog.so` on the VSC (the `/tmp` control files) and TX on.
 
-1. Open `http://vsc-bridge.local/mqtt` and enter the broker (for the Mosquitto add-on: the HA address, port 1883, and an HA user or Mosquitto login). The login is saved on the ESP only. Leave the host empty to turn MQTT off.
+1. Open `http://vsc-bridge.local/` and, in the MQTT section, enter the broker (for the Mosquitto add-on: the HA address, port 1883, and an HA user or Mosquitto login). The login is saved on the ESP only. Leave the host empty to turn MQTT off.
 2. A device **MRXBOX** appears with:
    - **Fan speed** (select 1/2/3)
    - **Bypass** (select Auto/On/Off)

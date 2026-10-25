@@ -35,10 +35,10 @@ This is the way to use the project today. Your VSC stays on the wall and keeps w
 **Step by step** (full how-to with pictures: **[docs/convert-card.md](docs/convert-card.md)**)
 
 1. **Flash the ESP32.** Open `esp/vsc-serial-bridge/vsc-serial-bridge.ino` in Arduino IDE (board package Espressif `esp32`, board "ESP32 Dev Module") and upload it over USB. Later updates can go over WiFi (network port `vsc-bridge`).
-2. **WiFi.** On first boot the ESP makes its own WiFi network `vsc-bridge`, password `nuaire123`. Join it from a phone or laptop and open `http://192.168.4.1/wifi`. Enter your WiFi name (SSID) and password (2.4 GHz network) and save, then reconnect your phone to your normal WiFi. The ESP restarts onto your network. If it can't join within 20 s, the `vsc-bridge` network comes back so you can try again.
+2. **WiFi.** On first boot the ESP makes its own WiFi network `vsc-bridge`, password `nuaire123`. Join it from a phone or laptop; the setup page opens by itself (or open `http://192.168.4.1/`). Scan, pick your WiFi (2.4 GHz network), enter its password and save, then reconnect your phone to your normal WiFi. The ESP restarts onto your network. If it can't reach your network for a minute, or you hold the BOOT button for 3 s, the `vsc-bridge` network comes back so you can try again.
 3. **Find the bridge.** Open `http://vsc-bridge.local/`. If that name doesn't resolve, use the ESP's IP from your router. Set the polarity to **TTL (normal)** (the default RS232 setting is only for the resistor hack).
 4. **MQTT in Home Assistant.** If you don't have a broker yet: Settings → Add-ons → install **Mosquitto broker** and start it, then Settings → Devices & services: the **MQTT** integration is discovered, so press Configure. Create an HA user for the bridge (Settings → People → Users, for example `mqtt-vsc`) or use an existing login.
-5. **MQTT on the ESP.** Open `http://vsc-bridge.local/mqtt` and enter the broker host (your HA address), port `1883`, and that user and password, then save. The login is kept on the ESP only. Leave the host empty to turn MQTT off.
+5. **MQTT on the ESP.** Open `http://vsc-bridge.local/` and, in the MQTT section, enter the broker host (your HA address), port `1883`, and that user and password, then save. The login is kept on the ESP only. Leave the host empty to turn MQTT off.
 6. **Convert the card.** Power the unit off at the isolator and take the SD card out of the VSC. On a Windows PC, put it in a card reader and run `vscconv.exe` from the [latest release](https://github.com/karwantes/Nuaire-MVHR/releases/latest). Press `1`, then `y`. Wait for `converted: 26 writes, all verified`. Keep the backup it makes.
 7. **Wire it.** Put the card back. Wire the ESP to the **LINUX TERMINAL** header through the MAX3232 module as in the diagram above.
 8. **Power on.** The bridge page shows `login: root`, then a status line every 20 s.
@@ -62,7 +62,7 @@ The rest of this page is the research behind it: how the VSC works, the logger i
 - [ ] Bridge authentication: a login for the web page, `/send` and OTA. Until then, keep the bridge on a trusted network.
 - [ ] Tap RS485 while logging I²C, to map I²C fields to the wire format.
 - [ ] Read-only ESPHome component.
-- [ ] ESP acting as the controller (replacing the VSC).
+- [x] ESP acting as the controller (replacing the VSC): [option 4](docs/option4-esp-replaces-vsc.md).
 
 The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 
@@ -73,7 +73,7 @@ The full byte-level map is in **[docs/protocol.md](docs/protocol.md)**.
 | 1 | Linux serial console, logger card | Full: HA → console → shell files → `es-lcd` → bus chip → bus | Implemented |
 | 2 | I²C tap, stock card | Read only: the ESP listens to `es-lcd` and the bus chip | In progress |
 | 3 | I²C, logger card with **Controlled by HASSOS** ticked | Full: `es-lcd` goes quiet on I²C and the ESP talks to the bus chip itself; a screen press hands control back | In progress |
-| 4 | No VSC, ESP on RS485 | Full: the ESP answers the unit in the VSC's bus slots | In progress |
+| 4 | No VSC, ESP on RS485 | Full: the ESP answers the unit in the VSC's bus slots | Validated with the VSC powered off: [how to](docs/option4-esp-replaces-vsc.md) |
 
 ## How the VSC works
 
@@ -189,7 +189,7 @@ Then follow [Using the logger image](#using-the-logger-image). To go back to sto
 
 1. Tap the RS485 lines between the VSC and the unit while the I²C logger runs, so each RS485 message lines up with a known I²C field.
 2. Read-only ESPHome first: temperatures, RH, fan speed, faults and boost state as HA sensors.
-3. Then the ESP talks as the controller: boost, speed, airflow %, bypass setpoint, night/holiday modes.
+3. Then the ESP talks as the controller: speed, airflow %, bypass setpoint, night/holiday modes. Done as [option 4](docs/option4-esp-replaces-vsc.md).
 
 ## Disclaimer
 
