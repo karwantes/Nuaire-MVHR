@@ -25,7 +25,7 @@ Nuaire MRXBOX in Home Assistant, with an ESP32: either in place of the **VSC / M
 
 Both use the same firmware, [esp/vsc-serial-bridge](esp/vsc-serial-bridge/README.md), and both put an **MRXBOX** device into Home Assistant by MQTT discovery (Mosquitto add-on, no YAML). The bridge's own page at `http://vsc-bridge.local/unit` shows the readings and controls without HA.
 
-Download: [latest release](https://github.com/karwantes/Nuaire-MVHR/releases/latest). Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-assistant.io/t/nuaire-mrxbox-interface-for-home-assistant/573933) (HA community).
+Downloads (`vscconv.exe`, the card): [releases](https://github.com/karwantes/Nuaire-MVHR/releases). Discussion: [Nuaire MRXBOX interface for Home Assistant](https://community.home-assistant.io/t/nuaire-mrxbox-interface-for-home-assistant/573933) (HA community).
 
 **Red (+10 V) never goes directly to the ESP**, only to the 5 V buck module's input. Turn the unit off at its isolator before you touch any wiring.
 
@@ -33,7 +33,15 @@ Download: [latest release](https://github.com/karwantes/Nuaire-MVHR/releases/lat
 
 Fan speed 1/2/3, bypass Auto/On/Off and its setpoint, humidity and frost setpoints, night and holiday mode, airflow % for each speed, both temperatures, humidity, running speed, bypass active, run and filter hours, filter change due, fault sensors and communication status. Option 1 adds the VSC's timers (speed 3 limit, night, holiday, bypass override); option 2 adds the screen timeout, the VSC clock and the debug log. Full list: [the bridge](esp/vsc-serial-bridge/README.md#home-assistant-mqtt).
 
-A dashboard card is included with the custom integration: [custom_components/nuaire_mvhr](custom_components/nuaire_mvhr/README.md).
+## Dashboard card
+
+[![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=karwantes&repository=Nuaire-MVHR&category=plugin)
+
+The **MVHR airflow card** draws the bridge's entities as a live diagram, with controls for fan speed 1/2/3, bypass, night and holiday. The air conditioning coil part is optional and is turned off when you have none. Install it with HACS (the button above) or by hand.
+
+**How to install and set it up: [card/docs/install.md](card/docs/install.md)**
+
+![MVHR airflow card](card/docs/images/card-wide.png)
 
 ## How the VSC works
 
@@ -63,7 +71,8 @@ The full byte-level map, both RS485 and I²C: **[docs/protocol.md](docs/protocol
 | `docs/build-logger-card.md` | Research: build a logger SD image from a copy of your card |
 | `docs/images/` | Wiring diagrams, photos, annotated VSC board |
 | `esp/vsc-serial-bridge/` | ESP32 firmware for both options |
-| `custom_components/nuaire_mvhr/` | HA custom integration (USB serial on the VSC console) and the dashboard card |
+| `card/` | MVHR airflow dashboard card: source, tests, [install guide](card/docs/install.md) |
+| `dist/`, `hacs.json` | The built card, where HACS installs it from |
 | `logger/` | `i2clog.c`, the library `vscconv.exe` adds to the VSC, and its build script |
 | `theme/` | Custom dark screen theme and the **Controlled by HASSOS** tick box |
 | `tools/vsc-convert/` | `vscconv.py` card converter (backup, convert, restore) and the `vscconv.exe` build |

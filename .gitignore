@@ -14,3 +14,5 @@ overview.png
 theme/logo.py
 tools/vsc-convert/build/
 tools/vsc-convert/dist/
+card/node_modules/
+card/dist/

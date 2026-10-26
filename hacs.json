@@ -1,1 +1,5 @@
-{ "name": "Nuaire MVHR (VSC serial)", "render_readme": false }
+{
+  "name": "MVHR airflow card",
+  "filename": "mvhr-airflow-card.js",
+  "render_readme": true
+}

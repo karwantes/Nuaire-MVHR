@@ -1,0 +1,74 @@
+{
+  "generated": "2026-10-26T07:24:09.398Z",
+  "versions": {
+    "chromium": "156.0.8078.4",
+    "firefox": "157.0",
+    "webkit": "27.2"
+  },
+  "results": {
+    "Geometry / port continuity": {
+      "pass": 1110,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "Responsive screen matrix": {
+      "pass": 1116,
+      "fail": 0,
+      "failures": [],
+      "notes": [
+        "chromium: sweep 320–2560 step 16 (141 widths)",
+        "firefox: sweep 320–2560 step 16 (141 widths)",
+        "webkit: sweep 320–2560 step 16 (141 widths)"
+      ]
+    },
+    "Accessibility": {
+      "pass": 1140,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "Feature combinations": {
+      "pass": 1731,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "Screenshots": {
+      "pass": 21,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "Service payloads/readback": {
+      "pass": 70,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "State and units": {
+      "pass": 10,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "GUI parity and persistence": {
+      "pass": 10,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "Navigation/assets": {
+      "pass": 5,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    },
+    "Build and unit tests": {
+      "pass": 1,
+      "fail": 0,
+      "failures": [],
+      "notes": []
+    }
+  }
+}

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MVHR card harness</title>
+<style>
+  html, body { margin: 0; background: #111417; color: #eee; font-family: system-ui, sans-serif; }
+  #root { padding: 0; display: flex; flex-direction: column; gap: 16px; }
+  .cell { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+  // Fixture harness for browser tests. Nothing here talks to Home Assistant: hass is a
+  // mock built from the pack's reference state, and callService is a spy.
+  import { demoHass, demoBindings, demoEntity } from "../../src/fixture.js";
+
+  // Count live ResizeObservers so attach/detach tests can find leaks.
+  const RO = window.ResizeObserver;
+  window.__ro = { live: 0, made: 0 };
+  window.ResizeObserver = class extends RO {
+    constructor(cb) { super(cb); this.__on = true; window.__ro.live++; window.__ro.made++; }
+    disconnect() { if (this.__on) { this.__on = false; window.__ro.live--; } super.disconnect(); }
+  };
+  window.__errors = [];
+  window.addEventListener("error", (e) => window.__errors.push(String(e.message)));
+  window.addEventListener("unhandledrejection", (e) => window.__errors.push(String(e.reason)));
+
+  window.__calls = [];
+  window.__moreInfo = [];
+  document.addEventListener("hass-more-info", (e) => window.__moreInfo.push(e.detail.entityId));
+
+  // mode: "ok" resolves; "reject" rejects; "perm" unauthorized; "hang" never resolves.
+  window.__serviceMode = "ok";
+  window.makeHass = (overrides = {}) => {
+    const h = demoHass(overrides);
+    delete h.demo;
+    h.user = { is_admin: true };
+    h.callService = (domain, service, data) => {
+      window.__calls.push({ domain, service, data });
+      const m = window.__serviceMode;
+      if (m === "reject") return Promise.reject(new Error("Service failed"));
+      if (m === "perm") return Promise.reject({ code: "unauthorized", message: "Unauthorized" });
+      if (m === "hang") return new Promise(() => {});
+      return Promise.resolve();
+    };
+    return h;
+  };
+
+  // A live-like config: real bindings to the mock entities and verified adapters.
+  window.liveConfig = (extra = {}) => ({
+    type: "custom:mvhr-airflow-card",
+    read_only: false,
+    bindings: demoBindings(),
+    controls: {
+      fan_speed: { adapter: { kind: "select", entity: demoEntity("speed_state"), timeout_ms: 3000 } },
+      bypass_mode: { adapter: { kind: "select", entity: demoEntity("bypass_mode"), timeout_ms: 3000 } },
+      bypass_threshold: { adapter: { kind: "number", entity: demoEntity("bypass_threshold"), debounce_ms: 300, timeout_ms: 3000 } },
+      night: { adapter: { kind: "switch", entity: demoEntity("night_state"), timeout_ms: 3000 } },
+      holiday: { adapter: { kind: "switch", entity: demoEntity("holiday_state"), timeout_ms: 3000 } },
+    },
+    navigation: [
+      { label: "Forecast", icon: "forecast", path: "/lovelace/forecast" },
+      { label: "Inverter", icon: "inverter", path: "/lovelace/inverter" },
+      { label: "Attic", icon: "attic", path: "/lovelace/attic" },
+      { label: "Security", icon: "security", path: "/lovelace/security" },
+      { label: "BMS", icon: "bms", path: "/lovelace/bms" },
+      { label: "MVHR", icon: "mvhr", path: "/lovelace/mvhr", current: true },
+      { label: "Heat pump", icon: "pump", path: "/lovelace/heat-pump" },
+      { label: "Boiler", icon: "boiler", path: "/lovelace/boiler" },
+      { label: "Car", icon: "car", path: "/lovelace/car" },
+    ],
+    ...extra,
+  });
+
+  window.mount = async (config, { width = null, count = 1, hass = null } = {}) => {
+    const root = document.getElementById("root");
+    root.innerHTML = "";
+    const cards = [];
+    for (let i = 0; i < count; i++) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      if (width) cell.style.width = width + "px";
+      const card = document.createElement("mvhr-airflow-card");
+      card.setConfig(config);
+      card.hass = hass || window.makeHass();
+      cell.appendChild(card);
+      root.appendChild(cell);
+      cards.push(card);
+    }
+    await document.fonts.ready;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    window.__cards = cards;
+    return cards.length;
+  };
+
+  await customElements.whenDefined("mvhr-airflow-card");
+  window.__ready = true;
+</script>
+<script type="module" src="../../dist/mvhr-airflow-card.js"></script>
+</body>
+</html>
