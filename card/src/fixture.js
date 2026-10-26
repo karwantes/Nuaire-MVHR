@@ -7,7 +7,7 @@ import { BINDING_KEYS } from "./constants.js";
 export const REFERENCE = {
   outdoor_temperature: 13.0, exhaust_temperature: 15.9, supply_temperature: 21.9, extract_temperature: 22.0,
   extract_humidity: 46, indoor_temperature: 22.3, indoor_humidity: 46, recovery_efficiency: 98,
-  supply_fan_percent: 18, extract_fan_percent: 18, speed_state: "1", bypass_position: "open",
+  supply_fan_percent: 18, extract_fan_percent: 18, speed_state: "1", bypass_position: "closed",
   bypass_mode: "Auto", bypass_threshold: 24, coil_air_in: 21.9, coil_air_out: 21.8, coil_air_delta: -0.1,
   water_flow_temperature: 19.3, water_return_temperature: 21.1, buffer_temperature: 16.5,
   coil_status: "idle", online: true, fault: false, filter_runtime: 2957, unit_runtime: 29676,

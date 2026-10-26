@@ -876,13 +876,16 @@ function buildModel(hass, cfg, now = Date.now()) {
   readings.recovery_efficiency = deriveEfficiency(cfg, readings, bypass.state);
   const text = {};
   for (const k of BINDING_KEYS) text[k] = formatReading(cfg, hass, k, readings[k]);
+  const feats = effectiveFeatures(cfg);
+  const effBypassed = feats.bypass && bypass.state === "open" && readings.recovery_efficiency.status !== "unbound";
+  if (effBypassed) text.recovery_efficiency = "Off";
   const speedRaw = readings.speed_state.status === "ok" ? readings.speed_state.value : null;
   const modeRaw = readings.bypass_mode.status === "ok" ? readings.bypass_mode.value : null;
-  const feats = effectiveFeatures(cfg);
   return {
     features: feats,
     readings,
     text,
+    effBypassed,
     health: readHealth(hass, cfg),
     bypass: bypass.state,
     bypassMode: optionLabel(cfg, "bypass_mode", modeRaw) || (modeRaw ? String(modeRaw) : null),
@@ -1851,8 +1854,8 @@ function layoutInputs(cfg, model, hass, width, cardWidth, measure) {
     texts: model.text,
     tempUnit: displayTempUnit(cfg, hass),
     flags: {
-      effSource: eff && eff.source === "calculated" ? "Calculated" : "Reported",
-      effFlagged: !!(eff && eff.flagged),
+      effSource: model.effBypassed ? "Bypassed" : eff && eff.source === "calculated" ? "Calculated" : "Reported",
+      effFlagged: !model.effBypassed && !!(eff && eff.flagged),
       coilText: COIL_TEXT[model.coil] || "Unknown",
       bypassText: BYPASS_TEXT[model.bypass] || BYPASS_TEXT.unknown,
       bypassMode: model.bypassMode
@@ -2265,7 +2268,7 @@ var REFERENCE = {
   supply_fan_percent: 18,
   extract_fan_percent: 18,
   speed_state: "1",
-  bypass_position: "open",
+  bypass_position: "closed",
   bypass_mode: "Auto",
   bypass_threshold: 24,
   coil_air_in: 21.9,

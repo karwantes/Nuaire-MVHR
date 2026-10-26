@@ -145,9 +145,18 @@ test("demo model matches the reference values", () => {
   assert.equal(m.text.supply_temperature, "21.9°C");
   assert.equal(m.text.water_flow_temperature, "19.3°C");
   assert.equal(m.text.recovery_efficiency, "98%");
-  assert.equal(m.bypass, "open");
+  assert.equal(m.bypass, "closed");
   assert.equal(m.speed, "1");
   assert.equal(m.coil, "idle");
+});
+
+test("open bypass shows heat recovery as Off, not a number", () => {
+  const m = buildModel(demoHass({ bypass_position: "open" }), cfgWith());
+  assert.equal(m.effBypassed, true);
+  assert.equal(m.text.recovery_efficiency, "Off");
+  assert.equal(buildModel(demoHass(), cfgWith()).effBypassed, false);
+  const noBypass = buildModel(demoHass({ bypass_position: "open" }), cfgWith({ features: { bypass: false } }));
+  assert.equal(noBypass.text.recovery_efficiency, "98%");
 });
 
 test("fan percent by_speed follows the running speed", () => {

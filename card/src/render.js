@@ -23,8 +23,8 @@ export function layoutInputs(cfg, model, hass, width, cardWidth, measure) {
     texts: model.text,
     tempUnit: displayTempUnit(cfg, hass),
     flags: {
-      effSource: eff && eff.source === "calculated" ? "Calculated" : "Reported",
-      effFlagged: !!(eff && eff.flagged),
+      effSource: model.effBypassed ? "Bypassed" : eff && eff.source === "calculated" ? "Calculated" : "Reported",
+      effFlagged: !model.effBypassed && !!(eff && eff.flagged),
       coilText: COIL_TEXT[model.coil] || "Unknown",
       bypassText: BYPASS_TEXT[model.bypass] || BYPASS_TEXT.unknown,
       bypassMode: model.bypassMode,

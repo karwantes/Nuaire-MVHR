@@ -282,13 +282,17 @@ export function buildModel(hass, cfg, now = Date.now()) {
   readings.recovery_efficiency = deriveEfficiency(cfg, readings, bypass.state);
   const text = {};
   for (const k of BINDING_KEYS) text[k] = formatReading(cfg, hass, k, readings[k]);
+  const feats = effectiveFeatures(cfg);
+  // An open bypass sends the air round the exchanger, so there is no recovery to show.
+  const effBypassed = feats.bypass && bypass.state === "open" && readings.recovery_efficiency.status !== "unbound";
+  if (effBypassed) text.recovery_efficiency = "Off";
   const speedRaw = readings.speed_state.status === "ok" ? readings.speed_state.value : null;
   const modeRaw = readings.bypass_mode.status === "ok" ? readings.bypass_mode.value : null;
-  const feats = effectiveFeatures(cfg);
   return {
     features: feats,
     readings,
     text,
+    effBypassed,
     health: readHealth(hass, cfg),
     bypass: bypass.state,
     bypassMode: optionLabel(cfg, "bypass_mode", modeRaw) || (modeRaw ? String(modeRaw) : null),
