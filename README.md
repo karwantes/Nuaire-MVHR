@@ -1,4 +1,4 @@
-# Nuaire-MVHR
+# Nuaire-MVHR (Tested on ECO4)
 
 Nuaire MRXBOX in Home Assistant, with an ESP32: either in place of the **VSC / MRX Control** touchscreen, or alongside it.
 
