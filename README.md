@@ -81,6 +81,10 @@ The full byte-level map, both RS485 and I²C: **[docs/protocol.md](docs/protocol
 
 No firmware, card images, disassembly or Nuaire artwork are published here.
 
+## License
+
+[MIT](LICENSE). Use it, change it, build on it. Keep the copyright notice in copies, and a link back to this repo is appreciated if you publish something based on it.
+
 ## Disclaimer
 
 Not affiliated with or endorsed by Nuaire. This is interoperability research. Changing your VSC's card or wiring to the bus is at your own risk; keep the backup of your card.
